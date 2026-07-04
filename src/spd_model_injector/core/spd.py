@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import re
-import shutil
 from typing import Mapping, Sequence
 
 
 _PARTIAL_RE = re.compile(r"^\.PartialCkt\s+(.+?)\s+ExtNode\s*=\s*(.*)$", re.IGNORECASE)
+_PARTIAL_START_RE = re.compile(r"^\.PartialCkt(?:\s|$)", re.IGNORECASE)
+_END_PARTIAL_RE = re.compile(r"^\.EndPartialCkt(?:\s|$)", re.IGNORECASE)
+
+_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,7 @@ def scan_spd(path: str | Path) -> list[PartialCktBlock]:
                 break
             line_no += 1
             line_text = _decode_line(raw_line)
-            if not line_text.startswith(".PartialCkt"):
+            if not _PARTIAL_START_RE.match(line_text):
                 continue
 
             block_start_offset = line_start
@@ -71,7 +75,7 @@ def scan_spd(path: str | Path) -> list[PartialCktBlock]:
             if pending is not None:
                 current_start, current_raw, current_text, current_line = pending
                 while True:
-                    if current_text.startswith(".EndPartialCkt"):
+                    if _END_PARTIAL_RE.match(current_text):
                         body_end_offset = current_start
                         end_line = current_line
                         block_end_offset = current_start + len(current_raw)
@@ -107,7 +111,7 @@ def read_block_body(path: str | Path, block: PartialCktBlock) -> str:
     with Path(path).open("rb") as handle:
         handle.seek(block.body_start_offset)
         raw = handle.read(block.body_end_offset - block.body_start_offset)
-    return _normalize_newlines(raw.decode("utf-8"))
+    return _normalize_newlines(raw.decode("utf-8", errors="replace"))
 
 
 def write_spd_with_replacements(
@@ -119,33 +123,63 @@ def write_spd_with_replacements(
     """Write a new SPD, replacing only the body ranges for selected components."""
     source = Path(source_path)
     output = Path(output_path)
+    _ensure_output_is_not_source(source, output)
     replacement_by_offset = {
         block.body_start_offset: (_normalize_model_text(replacements[block.component_name]), block.body_end_offset)
         for block in blocks
         if block.component_name in replacements
     }
 
-    with source.open("rb", buffering=1024 * 1024) as src, output.open("wb", buffering=1024 * 1024) as dst:
+    with source.open("rb", buffering=_CHUNK_SIZE) as src, output.open("wb", buffering=_CHUNK_SIZE) as dst:
         cursor = 0
+        pending_cr = False
         for start_offset in sorted(replacement_by_offset):
             replacement, end_offset = replacement_by_offset[start_offset]
-            _copy_range(src, dst, cursor, start_offset)
+            pending_cr = _copy_range(src, dst, cursor, start_offset, pending_cr)
+            if pending_cr:
+                dst.write(b"\n")
+                pending_cr = False
             dst.write(replacement.encode("utf-8"))
-            src.seek(end_offset)
             cursor = end_offset
-        src.seek(cursor)
-        shutil.copyfileobj(src, dst, length=1024 * 1024)
+        pending_cr = _copy_range(src, dst, cursor, None, pending_cr)
+        if pending_cr:
+            dst.write(b"\n")
 
 
-def _copy_range(src, dst, start: int, end: int) -> None:
+def _ensure_output_is_not_source(source: Path, output: Path) -> None:
+    if source.exists() and output.exists() and os.path.samefile(source, output):
+        raise ValueError("Output path must differ from the source SPD path; writing would destroy the source.")
+    if source.resolve() == output.resolve():
+        raise ValueError("Output path must differ from the source SPD path; writing would destroy the source.")
+
+
+def _copy_range(src, dst, start: int, end: int | None, pending_cr: bool) -> bool:
+    """Copy [start, end) (or to EOF when end is None), LF-normalizing while streaming."""
     src.seek(start)
-    remaining = end - start
-    while remaining > 0:
-        chunk = src.read(min(1024 * 1024, remaining))
+    remaining = None if end is None else end - start
+    while remaining is None or remaining > 0:
+        size = _CHUNK_SIZE if remaining is None else min(_CHUNK_SIZE, remaining)
+        chunk = src.read(size)
         if not chunk:
             break
-        dst.write(chunk)
-        remaining -= len(chunk)
+        if remaining is not None:
+            remaining -= len(chunk)
+        normalized, pending_cr = _normalize_chunk(chunk, pending_cr)
+        dst.write(normalized)
+    return pending_cr
+
+
+def _normalize_chunk(chunk: bytes, pending_cr: bool) -> tuple[bytes, bool]:
+    prefix = b""
+    if pending_cr:
+        if chunk[:1] == b"\n":
+            chunk = chunk[1:]
+        prefix = b"\n"
+    trailing_cr = chunk.endswith(b"\r")
+    if trailing_cr:
+        chunk = chunk[:-1]
+    normalized = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return prefix + normalized, trailing_cr
 
 
 def _parse_component_name(first_header_line: str) -> str:
@@ -167,7 +201,7 @@ def _parse_ext_nodes(header_lines: Sequence[str]) -> list[str]:
 
 
 def _decode_line(raw_line: bytes) -> str:
-    return raw_line.decode("utf-8")
+    return raw_line.decode("utf-8", errors="replace")
 
 
 def _strip_newline(line: str) -> str:
