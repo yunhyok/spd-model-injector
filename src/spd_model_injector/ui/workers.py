@@ -35,6 +35,7 @@ class ExportWorker(QObject):
         blocks: list[PartialCktBlock],
         replacements: dict[str, str],
         refdes_component_changes: dict[str, str] | None = None,
+        refdes_activation_status_changes: dict[str, str] | None = None,
         refdes_records: list[RefDesRecord] | None = None,
     ) -> None:
         super().__init__()
@@ -43,7 +44,8 @@ class ExportWorker(QObject):
         self.blocks = blocks
         self.replacements = replacements
         self.refdes_component_changes = refdes_component_changes or {}
-        self.refdes_records = refdes_records or []
+        self.refdes_activation_status_changes = refdes_activation_status_changes or {}
+        self.refdes_records = refdes_records
 
     @Slot()
     def run(self) -> None:
@@ -54,6 +56,7 @@ class ExportWorker(QObject):
                 self.blocks,
                 self.replacements,
                 refdes_component_changes=self.refdes_component_changes,
+                refdes_activation_status_changes=self.refdes_activation_status_changes,
                 refdes_records=self.refdes_records,
             )
             self.finished.emit(str(self.output_path))

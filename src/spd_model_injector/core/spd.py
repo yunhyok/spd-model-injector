@@ -12,6 +12,7 @@ _PARTIAL_START_RE = re.compile(r"^\.PartialCkt(?:\s|$)", re.IGNORECASE)
 _END_PARTIAL_RE = re.compile(r"^\.EndPartialCkt(?:\s|$)", re.IGNORECASE)
 _CONNECT_RE = re.compile(r"^\.Connect\s+(\S+)\s+(\S+)(?:\s+(.*))?$", re.IGNORECASE)
 _USAGE_RE = re.compile(r"\bUsage\s*=\s*(\S+)", re.IGNORECASE)
+_USAGE_ASSIGNMENT_RE = re.compile(r"\s+Usage\s*=\s*\S+", re.IGNORECASE)
 
 _CHUNK_SIZE = 1024 * 1024
 ProgressCallback = Callable[[str, int, int], None]
@@ -171,6 +172,7 @@ def write_spd_with_replacements(
     replacements: Mapping[str, str],
     *,
     refdes_component_changes: Mapping[str, str] | None = None,
+    refdes_activation_status_changes: Mapping[str, str] | None = None,
     refdes_records: Sequence[RefDesRecord] | None = None,
 ) -> None:
     """Write a new SPD, replacing selected bodies and RefDes component links."""
@@ -183,16 +185,24 @@ def write_spd_with_replacements(
         if block.component_name in replacements
     }
 
-    if refdes_component_changes:
+    if refdes_component_changes or refdes_activation_status_changes:
+        component_changes = refdes_component_changes or {}
+        status_changes = refdes_activation_status_changes or {}
         records = refdes_records if refdes_records is not None else scan_spd_inventory(source).refdes_records
         for record in records:
-            new_component = refdes_component_changes.get(record.refdes_name)
-            if new_component is None:
+            new_component = component_changes.get(record.refdes_name)
+            new_status = status_changes.get(record.refdes_name)
+            if new_component is None and new_status is None:
                 continue
             if record.connect_line_start_offset is None or record.connect_line_end_offset is None or record.connect_line is None:
                 raise ValueError(f"RefDes {record.refdes_name} does not include .Connect line metadata.")
+            connect_line = record.connect_line
+            if new_component is not None:
+                connect_line = _replace_connect_component(connect_line, new_component)
+            if new_status is not None:
+                connect_line = _replace_connect_activation_status(connect_line, new_status)
             replacement_by_offset[record.connect_line_start_offset] = (
-                _normalize_newlines(_replace_connect_component(record.connect_line, new_component)),
+                _normalize_newlines(connect_line),
                 record.connect_line_end_offset,
             )
 
@@ -290,6 +300,28 @@ def _replace_connect_component(line: str, component_name: str) -> str:
     if not match:
         raise ValueError(f"Invalid .Connect line: {_strip_newline(line)}")
     return f"{match.group(1)}{component_name}{match.group(3)}"
+
+
+def _replace_connect_activation_status(line: str, activation_status: str) -> str:
+    usage = _usage_for_activation_status(activation_status)
+    if usage is None:
+        return _USAGE_ASSIGNMENT_RE.sub("", line, count=1)
+    if _USAGE_ASSIGNMENT_RE.search(line):
+        return re.sub(r"(Usage\s*=\s*)\S+", rf"\g<1>{usage}", line, count=1, flags=re.IGNORECASE)
+    match = re.match(r"^(\.Connect\s+\S+\s+\S+)(.*)$", line, re.IGNORECASE | re.DOTALL)
+    if not match:
+        raise ValueError(f"Invalid .Connect line: {_strip_newline(line)}")
+    return f"{match.group(1)} Usage = {usage}{match.group(2)}"
+
+
+def _usage_for_activation_status(activation_status: str) -> str | None:
+    if activation_status == "Automatic":
+        return None
+    if activation_status == "Enabled":
+        return "0b1000"
+    if activation_status == "Disabled":
+        return "0b111000"
+    raise ValueError(f"Unknown activation status: {activation_status}")
 
 
 def _activation_status(attributes: str) -> str:

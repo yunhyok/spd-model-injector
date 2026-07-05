@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderVi
 
 from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, SpdInventory
 from spd_model_injector.ui.main_window import MainWindow
+from spd_model_injector.ui.workers import ExportWorker
 
 
 def _spin_until(app: QApplication, predicate, timeout: float, what: str) -> None:
@@ -68,6 +69,8 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert window.status_log.parent() is not work_splitter.widget(0)
     assert window.status_log.parent() is not work_splitter.widget(1)
     assert "Export RefDes Excel" in toolbar_actions
+    assert "Import RefDes Status Excel" in toolbar_actions
+    assert toolbar_actions.index("Import RefDes Status Excel") == toolbar_actions.index("Export RefDes Excel") + 1
 
 
 def test_main_window_refdes_list_has_framed_sortable_resizable_columns() -> None:
@@ -219,6 +222,168 @@ def test_main_window_refdes_excel_export_uses_changed_components(tmp_path: Path)
         ("Component", "RefDes Name", "Activation Status"),
         ("CAP_0603", "C100_0", "Automatic"),
     ]
+
+
+def test_main_window_imports_refdes_status_excel_after_name_and_count_validation(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402"), _make_block("RES_0402")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+        RefDesRecord(component_name="RES_0402", refdes_name="R1", activation_status="Disabled"),
+    ]
+    window.rebuild_refdes_groups()
+    window.populate_components()
+    window.component_list.setCurrentRow(0)
+    status_path = tmp_path / "status.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component", "RefDes Name", "Activation Status"])
+    sheet.append(["CAP_0402", "C100_0", "Enabled"])
+    sheet.append(["CAP_0402", "C285_0", "Disabled"])
+    sheet.append(["RES_0402", "R1", "Automatic"])
+    workbook.save(status_path)
+
+    window.import_refdes_status_file(status_path)
+
+    assert window.refdes_activation_status_changes == {
+        "C100_0": "Enabled",
+        "C285_0": "Disabled",
+        "R1": "Automatic",
+    }
+    assert [(record.refdes_name, record.activation_status) for record in window.effective_refdes_records()] == [
+        ("C100_0", "Enabled"),
+        ("C285_0", "Disabled"),
+        ("R1", "Automatic"),
+    ]
+    assert window.refdes_table.item(0, 1).text() == "Enabled"
+    assert window.refdes_table.item(1, 1).text() == "Disabled"
+    assert "Imported 3 RefDes activation status" in window.status_log.toPlainText()
+
+
+def test_main_window_rejects_refdes_status_excel_with_different_names_or_count(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+    window.rebuild_refdes_groups()
+    mismatch_path = tmp_path / "status_mismatch.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component", "RefDes Name", "Activation Status"])
+    sheet.append(["CAP_0402", "C100_0", "Disabled"])
+    sheet.append(["CAP_0402", "C999_0", "Enabled"])
+    workbook.save(mismatch_path)
+    count_path = tmp_path / "status_count.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component", "RefDes Name", "Activation Status"])
+    sheet.append(["CAP_0402", "C100_0", "Disabled"])
+    workbook.save(count_path)
+
+    assert "Missing RefDes: C285_0" in window.validate_refdes_status_file(mismatch_path)
+    assert "Unexpected RefDes: C999_0" in window.validate_refdes_status_file(mismatch_path)
+    assert "RefDes count mismatch: expected 2, got 1" in window.validate_refdes_status_file(count_path)
+    assert window.refdes_activation_status_changes == {}
+
+
+def test_main_window_refdes_status_import_round_trips_unknown_only_for_unknown_records(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Unknown"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+    window.rebuild_refdes_groups()
+    status_path = tmp_path / "status_unknown.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component", "RefDes Name", "Activation Status"])
+    sheet.append(["CAP_0402", "C100_0", "Unknown"])
+    sheet.append(["CAP_0402", "C285_0", "Disabled"])
+    workbook.save(status_path)
+    invalid_path = tmp_path / "status_invalid_unknown.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component", "RefDes Name", "Activation Status"])
+    sheet.append(["CAP_0402", "C100_0", "Enabled"])
+    sheet.append(["CAP_0402", "C285_0", "Unknown"])
+    workbook.save(invalid_path)
+
+    window.import_refdes_status_file(status_path)
+
+    assert window.refdes_activation_status_changes == {"C285_0": "Disabled"}
+    assert "Unknown Activation Status: Unknown" in window.validate_refdes_status_file(invalid_path)
+
+
+def test_main_window_refdes_status_import_rejects_unreadable_xlsx(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.refdes_records = [RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic")]
+    bad_path = tmp_path / "not_excel.xlsx"
+    bad_path.write_text("not an excel workbook", encoding="utf-8")
+
+    errors = window.validate_refdes_status_file(bad_path)
+
+    assert len(errors) == 1
+    assert "Could not read RefDes status Excel" in errors[0]
+
+
+def test_main_window_changes_selected_refdes_activation_statuses(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+    window.rebuild_refdes_groups()
+    window.populate_components()
+    window.component_list.setCurrentRow(0)
+
+    first = window.refdes_table.model().index(0, 0)
+    second = window.refdes_table.model().index(1, 0)
+    selection = window.refdes_table.selectionModel()
+    selection.select(first, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    selection.select(second, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    window.apply_refdes_activation_status_changes(window.selected_refdes_names(), "Disabled")
+
+    assert window.refdes_activation_status_changes == {"C100_0": "Disabled", "C285_0": "Disabled"}
+    assert window.refdes_table.item(0, 1).text() == "Disabled"
+    assert window.refdes_table.item(1, 1).text() == "Disabled"
+
+
+def test_export_worker_preserves_refdes_record_fallback_scan_for_status_changes(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    spd_path = tmp_path / "board.spd"
+    output_path = tmp_path / "board_out.spd"
+    spd_path.write_text(
+        ".Connect C100_0 CAP_0402 Checked = 1\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    finished: list[str] = []
+    failed: list[str] = []
+    worker = ExportWorker(
+        spd_path,
+        output_path,
+        [],
+        {},
+        refdes_activation_status_changes={"C100_0": "Enabled"},
+    )
+    worker.finished.connect(finished.append)
+    worker.failed.connect(failed.append)
+
+    worker.run()
+
+    assert failed == []
+    assert finished == [str(output_path)]
+    assert output_path.read_text(encoding="utf-8") == ".Connect C100_0 CAP_0402 Usage = 0b1000 Checked = 1\n"
 
 
 def test_main_window_refdes_component_undo_stack_keeps_ten_batches(tmp_path: Path) -> None:

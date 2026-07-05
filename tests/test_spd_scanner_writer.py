@@ -189,6 +189,40 @@ def test_write_spd_replaces_refdes_component_and_preserves_connect_attributes(tm
     assert ".Connect C100_0 CAP_0603 Usage = 0b1000 Checked = 1\n" in output_path.read_text(encoding="utf-8")
 
 
+def test_write_spd_replaces_refdes_activation_status_and_preserves_connect_attributes(tmp_path: Path) -> None:
+    spd_path = tmp_path / "board.spd"
+    output_path = tmp_path / "board_out.spd"
+    spd_path.write_text(
+        "Title Example\n"
+        ".Connect C100_0 CAP_0402 Checked = 1\n"
+        ".Connect C285_0 CAP_0402 Usage = 0b1000 Checked = 1\n"
+        ".Connect C104_14 CAP_0402 Usage = 0b111000 Checked = 1\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    inventory = scan_spd_inventory(spd_path)
+
+    write_spd_with_replacements(
+        spd_path,
+        output_path,
+        inventory.blocks,
+        {},
+        refdes_activation_status_changes={
+            "C100_0": "Enabled",
+            "C285_0": "Disabled",
+            "C104_14": "Automatic",
+        },
+        refdes_records=inventory.refdes_records,
+    )
+
+    assert output_path.read_text(encoding="utf-8") == (
+        "Title Example\n"
+        ".Connect C100_0 CAP_0402 Usage = 0b1000 Checked = 1\n"
+        ".Connect C285_0 CAP_0402 Usage = 0b111000 Checked = 1\n"
+        ".Connect C104_14 CAP_0402 Checked = 1\n"
+    )
+
+
 def test_write_spd_combines_partialckt_body_and_refdes_component_changes(tmp_path: Path) -> None:
     spd_path = tmp_path / "board.spd"
     output_path = tmp_path / "board_out.spd"
@@ -224,6 +258,33 @@ def test_write_spd_combines_partialckt_body_and_refdes_component_changes(tmp_pat
         "C 1 2 2u\n"
         ".EndPartialCkt\n"
         ".Connect C100_0 CAP_0603 Checked = 1\n"
+    )
+
+
+def test_write_spd_combines_refdes_component_and_activation_status_changes(tmp_path: Path) -> None:
+    spd_path = tmp_path / "board.spd"
+    output_path = tmp_path / "board_out.spd"
+    spd_path.write_text(
+        "Title Example\n"
+        ".Connect C100_0 CAP_0402 Checked = 1\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    inventory = scan_spd_inventory(spd_path)
+
+    write_spd_with_replacements(
+        spd_path,
+        output_path,
+        inventory.blocks,
+        {},
+        refdes_component_changes={"C100_0": "CAP_0603"},
+        refdes_activation_status_changes={"C100_0": "Disabled"},
+        refdes_records=inventory.refdes_records,
+    )
+
+    assert output_path.read_text(encoding="utf-8") == (
+        "Title Example\n"
+        ".Connect C100_0 CAP_0603 Usage = 0b111000 Checked = 1\n"
     )
 
 

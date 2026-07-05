@@ -141,6 +141,10 @@ class RefDesComponentChangeBatch:
     changes: list[RefDesComponentChange]
 
 
+VALID_ACTIVATION_STATUSES = ("Enabled", "Disabled", "Automatic")
+IMPORTABLE_ACTIVATION_STATUSES = (*VALID_ACTIVATION_STATUSES, "Unknown")
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -155,6 +159,7 @@ class MainWindow(QMainWindow):
         self.refdes_records: list[RefDesRecord] = []
         self.refdes_by_component: dict[str, list[RefDesRecord]] = {}
         self.refdes_component_changes: dict[str, str] = {}
+        self.refdes_activation_status_changes: dict[str, str] = {}
         self.refdes_component_undo_stack: list[RefDesComponentChangeBatch] = []
         self.replacements: dict[str, str] = {}
         self._loading_editor = False
@@ -164,6 +169,7 @@ class MainWindow(QMainWindow):
         self._export_thread: QThread | None = None
         self._export_worker: ExportWorker | None = None
         self.export_refdes_action: QAction | None = None
+        self.import_refdes_status_action: QAction | None = None
         self.undo_component_change_action: QAction | None = None
 
         self.component_list_label = QLabel("PartialCkt Components (0/0)")
@@ -262,6 +268,11 @@ class MainWindow(QMainWindow):
         self.export_refdes_action.triggered.connect(self.export_refdes_dialog)
         toolbar.addAction(self.export_refdes_action)
 
+        self.import_refdes_status_action = QAction("Import RefDes Status Excel", self)
+        self.import_refdes_status_action.setEnabled(False)
+        self.import_refdes_status_action.triggered.connect(self.import_refdes_status_dialog)
+        toolbar.addAction(self.import_refdes_status_action)
+
     def _build_menus(self) -> None:
         edit_menu = self.menuBar().addMenu("Edit")
         self.undo_component_change_action = QAction("Undo Component Change", self)
@@ -348,6 +359,8 @@ class MainWindow(QMainWindow):
         self._busy = busy
         for action in (self.load_action, self.validate_action, self.export_action):
             action.setEnabled(not busy)
+        if self.import_refdes_status_action is not None:
+            self.import_refdes_status_action.setEnabled(not busy and bool(self.refdes_records))
         for button in (self.import_button, self.validate_button):
             button.setEnabled(not busy)
 
@@ -382,6 +395,7 @@ class MainWindow(QMainWindow):
         self.refdes_records = []
         self.refdes_by_component = {}
         self.refdes_component_changes.clear()
+        self.refdes_activation_status_changes.clear()
         self.refdes_component_undo_stack.clear()
         self.replacements.clear()
         self.component_list.clear()
@@ -393,6 +407,8 @@ class MainWindow(QMainWindow):
         self._update_undo_component_change_action()
         if self.export_refdes_action is not None:
             self.export_refdes_action.setEnabled(False)
+        if self.import_refdes_status_action is not None:
+            self.import_refdes_status_action.setEnabled(False)
         self._populate_refdes_table(None)
         self.component_label.setText("No component selected")
         self.mapping_label.setText("Scanning for PartialCkt blocks...")
@@ -437,6 +453,7 @@ class MainWindow(QMainWindow):
         self.blocks = inventory.blocks
         self.refdes_records = inventory.refdes_records
         self.refdes_component_changes.clear()
+        self.refdes_activation_status_changes.clear()
         self.refdes_component_undo_stack.clear()
         self.rebuild_refdes_groups()
         self.replacements.clear()
@@ -444,6 +461,8 @@ class MainWindow(QMainWindow):
         self._update_undo_component_change_action()
         if self.export_refdes_action is not None:
             self.export_refdes_action.setEnabled(bool(self.refdes_records))
+        if self.import_refdes_status_action is not None:
+            self.import_refdes_status_action.setEnabled(bool(self.refdes_records))
         self.progress.setValue(100)
         self.progress.setVisible(False)
         self._set_busy(False)
@@ -464,11 +483,14 @@ class MainWindow(QMainWindow):
         self.refdes_records = []
         self.refdes_by_component = {}
         self.refdes_component_changes.clear()
+        self.refdes_activation_status_changes.clear()
         self.refdes_component_undo_stack.clear()
         self.replacements.clear()
         self.component_list.clear()
         self._update_component_header()
         self._update_undo_component_change_action()
+        if self.import_refdes_status_action is not None:
+            self.import_refdes_status_action.setEnabled(False)
         self._populate_refdes_table(None)
         self.component_label.setText("No component selected")
         self.mapping_label.setText("Load an SPD file to inspect PartialCkt blocks.")
@@ -575,7 +597,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if not self.replacements and not self.refdes_component_changes:
+        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes:
             confirm = QMessageBox.question(
                 self,
                 "Export",
@@ -610,6 +632,20 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self._append_status(message)
 
+    def import_refdes_status_dialog(self) -> None:
+        if not self.refdes_records:
+            QMessageBox.information(self, "Import RefDes Status Excel", "No RefDes records are loaded.")
+            return
+        directory = str(self.spd_path.parent) if self.spd_path else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import RefDes Status Excel",
+            directory,
+            "Excel files (*.xlsx);;All files (*)",
+        )
+        if path:
+            self.import_refdes_status_file(path)
+
     def export_spd(self, output_path: str | Path) -> None:
         if self.spd_path is None:
             return
@@ -626,6 +662,7 @@ class MainWindow(QMainWindow):
             self.blocks,
             dict(self.replacements),
             dict(self.refdes_component_changes),
+            dict(self.refdes_activation_status_changes),
             list(self.refdes_records),
         )
         self._export_worker.moveToThread(self._export_thread)
@@ -770,9 +807,16 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self.refdes_table)
         change_action = menu.addAction(f"Change Component... ({len(refdes_names)} RefDes)")
+        menu.addSeparator()
+        status_actions = {
+            menu.addAction(f"Set Status: {status}"): status
+            for status in VALID_ACTIVATION_STATUSES
+        }
         selected_action = menu.exec(self.refdes_table.viewport().mapToGlobal(position))
         if selected_action is change_action:
             self.change_selected_refdes_components(refdes_names)
+        elif selected_action in status_actions:
+            self.apply_refdes_activation_status_changes(refdes_names, status_actions[selected_action])
 
     def change_selected_refdes_components(self, refdes_names: list[str] | None = None) -> None:
         names = refdes_names or self.selected_refdes_names()
@@ -863,12 +907,26 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self._append_status(message)
 
+    def _after_refdes_status_change(self, message: str) -> None:
+        self.rebuild_refdes_groups()
+        current = self.current_block()
+        self._populate_refdes_table(current.component_name if current is not None else None)
+        self.status_label.setText(message)
+        self._append_status(message)
+
     def _set_refdes_effective_component(self, refdes_name: str, component_name: str) -> None:
         original = self.original_component_for_refdes(refdes_name)
         if original is None or original == component_name:
             self.refdes_component_changes.pop(refdes_name, None)
             return
         self.refdes_component_changes[refdes_name] = component_name
+
+    def _set_refdes_effective_activation_status(self, refdes_name: str, activation_status: str) -> None:
+        original = self.original_activation_status_for_refdes(refdes_name)
+        if original is None or original == activation_status:
+            self.refdes_activation_status_changes.pop(refdes_name, None)
+            return
+        self.refdes_activation_status_changes[refdes_name] = activation_status
 
     def _update_undo_component_change_action(self) -> None:
         if self.undo_component_change_action is not None:
@@ -882,7 +940,14 @@ class MainWindow(QMainWindow):
 
     def effective_refdes_records(self) -> list[RefDesRecord]:
         return [
-            replace(record, component_name=self.refdes_component_changes.get(record.refdes_name, record.component_name))
+            replace(
+                record,
+                component_name=self.refdes_component_changes.get(record.refdes_name, record.component_name),
+                activation_status=self.refdes_activation_status_changes.get(
+                    record.refdes_name,
+                    record.activation_status,
+                ),
+            )
             for record in self.refdes_records
         ]
 
@@ -897,6 +962,84 @@ class MainWindow(QMainWindow):
         if original is None:
             return None
         return self.refdes_component_changes.get(refdes_name, original)
+
+    def original_activation_status_for_refdes(self, refdes_name: str) -> str | None:
+        for record in self.refdes_records:
+            if record.refdes_name == refdes_name:
+                return record.activation_status
+        return None
+
+    def effective_activation_status_for_refdes(self, refdes_name: str) -> str | None:
+        original = self.original_activation_status_for_refdes(refdes_name)
+        if original is None:
+            return None
+        return self.refdes_activation_status_changes.get(refdes_name, original)
+
+    def apply_refdes_activation_status_changes(self, refdes_names: list[str], activation_status: str) -> None:
+        errors = self.validate_refdes_activation_status_changes({name: activation_status for name in refdes_names})
+        if errors:
+            QMessageBox.warning(self, "Change Activation Status", "\n".join(errors))
+            return
+        changed = 0
+        for refdes_name in refdes_names:
+            if self.effective_activation_status_for_refdes(refdes_name) == activation_status:
+                continue
+            self._set_refdes_effective_activation_status(refdes_name, activation_status)
+            changed += 1
+        if changed:
+            self._after_refdes_status_change(f"Changed {changed} RefDes activation status value(s).")
+
+    def validate_refdes_activation_status_changes(self, changes: dict[str, str]) -> list[str]:
+        known_refdes = {record.refdes_name for record in self.refdes_records}
+        errors: list[str] = []
+        for refdes_name in sorted({name for name in changes if name not in known_refdes}):
+            errors.append(f"Unknown RefDes: {refdes_name}")
+        for activation_status in sorted({status for status in changes.values() if status not in VALID_ACTIVATION_STATUSES}):
+            errors.append(f"Unknown Activation Status: {activation_status}")
+        return errors
+
+    def load_refdes_status_file(self, path: str | Path) -> dict[str, str]:
+        statuses, errors = self._parse_refdes_status_file(path)
+        if errors:
+            raise ValueError("\n".join(errors))
+        return statuses
+
+    def validate_refdes_status_file(self, path: str | Path) -> list[str]:
+        statuses, errors = self._parse_refdes_status_file(path)
+        if errors:
+            return errors
+        current_refdes = {record.refdes_name for record in self.refdes_records}
+        imported_refdes = set(statuses)
+        validation_errors: list[str] = []
+        if len(statuses) != len(self.refdes_records):
+            validation_errors.append(f"RefDes count mismatch: expected {len(self.refdes_records)}, got {len(statuses)}")
+        for refdes_name in sorted(current_refdes - imported_refdes):
+            validation_errors.append(f"Missing RefDes: {refdes_name}")
+        for refdes_name in sorted(imported_refdes - current_refdes):
+            validation_errors.append(f"Unexpected RefDes: {refdes_name}")
+        for refdes_name, activation_status in statuses.items():
+            if refdes_name not in current_refdes:
+                continue
+            if activation_status in VALID_ACTIVATION_STATUSES:
+                continue
+            if activation_status == "Unknown" and self.original_activation_status_for_refdes(refdes_name) == "Unknown":
+                continue
+            validation_errors.append(f"Unknown Activation Status: {activation_status}")
+        return validation_errors
+
+    def import_refdes_status_file(self, path: str | Path) -> None:
+        errors = self.validate_refdes_status_file(path)
+        if errors:
+            QMessageBox.warning(self, "Import RefDes Status Excel", "\n".join(errors))
+            return
+        statuses = self.load_refdes_status_file(path)
+        changed = 0
+        for refdes_name, activation_status in statuses.items():
+            if self.effective_activation_status_for_refdes(refdes_name) == activation_status:
+                continue
+            self._set_refdes_effective_activation_status(refdes_name, activation_status)
+            changed += 1
+        self._after_refdes_status_change(f"Imported {changed} RefDes activation status value(s).")
 
     def load_refdes_component_change_file(self, path: str | Path) -> dict[str, str]:
         changes, errors = self._parse_refdes_component_change_file(path)
@@ -977,6 +1120,46 @@ class MainWindow(QMainWindow):
                 continue
             changes[refdes_name] = component_name
         return changes, errors
+
+    def _parse_refdes_status_file(self, path: str | Path) -> tuple[dict[str, str], list[str]]:
+        file_path = Path(path)
+        if file_path.suffix.lower() != ".xlsx":
+            return {}, [f"Unsupported file type: {file_path.suffix}"]
+
+        try:
+            rows = _read_refdes_component_xlsx(file_path)
+        except Exception as exc:
+            return {}, [f"Could not read RefDes status Excel: {exc}"]
+        if not rows:
+            return {}, ["RefDes status file is empty."]
+        header_row, header_values = rows[0]
+        expected_header = ["Component", "RefDes Name", "Activation Status"]
+        header = [value.strip() for value in header_values[:3]]
+        extra_header_values = [value.strip() for value in header_values[3:] if value.strip()]
+        if header != expected_header or extra_header_values:
+            return {}, [f"Row {header_row}: expected header: {', '.join(expected_header)}"]
+
+        statuses: dict[str, str] = {}
+        errors: list[str] = []
+        for row_number, values in rows[1:]:
+            component_name = values[0].strip() if len(values) > 0 else ""
+            refdes_name = values[1].strip() if len(values) > 1 else ""
+            activation_status = values[2].strip() if len(values) > 2 else ""
+            extra_values = [value.strip() for value in values[3:] if value.strip()]
+            if not component_name or not refdes_name or not activation_status:
+                errors.append(f"Row {row_number}: Component, RefDes Name, and Activation Status are required.")
+                continue
+            if extra_values:
+                errors.append(f"Row {row_number}: expected exactly 3 columns.")
+                continue
+            if refdes_name in statuses:
+                errors.append(f"Duplicate RefDes: {refdes_name}")
+                continue
+            if activation_status not in IMPORTABLE_ACTIVATION_STATUSES:
+                errors.append(f"Unknown Activation Status: {activation_status}")
+                continue
+            statuses[refdes_name] = activation_status
+        return statuses, errors
 
     def _refresh_current_item(self) -> None:
         block = self.current_block()
