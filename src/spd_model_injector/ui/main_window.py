@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, replace
+import html
 import io
 from pathlib import Path
 
+from openpyxl import load_workbook
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -34,7 +37,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from openpyxl import load_workbook
 
 from spd_model_injector import __version__
 from spd_model_injector.core.refdes_export import export_refdes_xlsx
@@ -45,14 +47,29 @@ from spd_model_injector.ui.workers import ExportWorker, ScanWorker
 
 class DropModelEditor(QPlainTextEdit):
     fileDropped = Signal(str)
+    fileDropError = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self.setAcceptDrops(True)
         self.setPlaceholderText("Paste SPICE model text or drop a .mod/.txt file here.")
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        if not font.fixedPitch():
+            font = QFont("Courier New")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setFixedPitch(True)
+        self.setFont(font)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls() or event.mimeData().hasText():
+        mime = event.mimeData()
+        if mime.hasUrls():
+            if any(url.isLocalFile() and Path(url.toLocalFile()).is_file() for url in mime.urls()):
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
+        if mime.hasText():
             event.acceptProposedAction()
             return
         super().dragEnterEvent(event)
@@ -61,11 +78,22 @@ class DropModelEditor(QPlainTextEdit):
         mime = event.mimeData()
         if mime.hasUrls():
             for url in mime.urls():
+                if not url.isLocalFile():
+                    continue
                 path = Path(url.toLocalFile())
-                if path.is_file():
-                    self.fileDropped.emit(path.read_text(encoding="utf-8"))
+                if not path.is_file():
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    self.fileDropError.emit(f"Could not read {path.name}: {exc}")
                     event.acceptProposedAction()
                     return
+                self.fileDropped.emit(text)
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
         if mime.hasText():
             self.fileDropped.emit(mime.text())
             event.acceptProposedAction()
@@ -118,8 +146,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"SPD Model Injector {__version__}")
         self.resize(1400, 760)
+        self.setMinimumSize(900, 600)
 
         self.spd_path: Path | None = None
+        self._pending_spd_path: Path | None = None
         self.inventory = SpdInventory(blocks=[], refdes_records=[])
         self.blocks: list[PartialCktBlock] = []
         self.refdes_records: list[RefDesRecord] = []
@@ -128,12 +158,19 @@ class MainWindow(QMainWindow):
         self.refdes_component_undo_stack: list[RefDesComponentChangeBatch] = []
         self.replacements: dict[str, str] = {}
         self._loading_editor = False
+        self._busy = False
         self._scan_thread: QThread | None = None
-        self._export_thread: QThread | None = None
         self._scan_worker: ScanWorker | None = None
+        self._export_thread: QThread | None = None
         self._export_worker: ExportWorker | None = None
         self.export_refdes_action: QAction | None = None
         self.undo_component_change_action: QAction | None = None
+
+        self.component_list_label = QLabel("PartialCkt Components (0/0)")
+        self.component_filter = QLineEdit()
+        self.component_filter.setPlaceholderText("Filter components...")
+        self.component_filter.setToolTip("Filter components by name (Ctrl+F)")
+        self.component_filter.textChanged.connect(self._apply_component_filter)
 
         self.component_list = QListWidget()
         self.component_list.currentRowChanged.connect(self._on_current_row_changed)
@@ -166,6 +203,7 @@ class MainWindow(QMainWindow):
 
         self.editor = DropModelEditor()
         self.editor.fileDropped.connect(self.import_model_text)
+        self.editor.fileDropError.connect(lambda message: self._show_validation(message, error=True))
         self.editor.textChanged.connect(self._on_editor_changed)
 
         self.validation_label = QLabel("")
@@ -185,6 +223,7 @@ class MainWindow(QMainWindow):
         self._build_layout()
         self._build_toolbar()
         self._build_menus()
+        self._build_shortcuts()
         self.setStatusBar(QStatusBar())
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.progress)
@@ -195,21 +234,28 @@ class MainWindow(QMainWindow):
         self.toolBar = toolbar
         self.addToolBar(toolbar)
 
-        load_action = QAction("Load SPD", self)
-        load_action.triggered.connect(self.load_spd_dialog)
-        toolbar.addAction(load_action)
+        self.load_action = QAction("Load SPD", self)
+        self.load_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.load_action.setToolTip("Load an SPD file and scan for PartialCkt blocks (Ctrl+O)")
+        self.load_action.triggered.connect(self.load_spd_dialog)
+        toolbar.addAction(self.load_action)
 
-        validate_action = QAction("Validate/Convert", self)
-        validate_action.triggered.connect(self.validate_current_text)
-        toolbar.addAction(validate_action)
+        self.validate_action = QAction("Validate/Convert", self)
+        self.validate_action.setShortcut(QKeySequence("Ctrl+Return"))
+        self.validate_action.setToolTip("Validate or convert the current editor text (Ctrl+Return)")
+        self.validate_action.triggered.connect(self.validate_current_text)
+        toolbar.addAction(self.validate_action)
 
-        revert_action = QAction("Revert", self)
-        revert_action.triggered.connect(self.revert_current)
-        toolbar.addAction(revert_action)
+        self.revert_action = QAction("Revert", self)
+        self.revert_action.setToolTip("Revert the selected component to the body stored in the SPD")
+        self.revert_action.triggered.connect(self.revert_current)
+        toolbar.addAction(self.revert_action)
 
-        export_action = QAction("Export New SPD", self)
-        export_action.triggered.connect(self.export_spd_dialog)
-        toolbar.addAction(export_action)
+        self.export_action = QAction("Export New SPD", self)
+        self.export_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.export_action.setToolTip("Export a new SPD with modified bodies replaced (Ctrl+E)")
+        self.export_action.triggered.connect(self.export_spd_dialog)
+        toolbar.addAction(self.export_action)
 
         self.export_refdes_action = QAction("Export RefDes Excel", self)
         self.export_refdes_action.setEnabled(False)
@@ -231,7 +277,8 @@ class MainWindow(QMainWindow):
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        left_layout.addWidget(QLabel("PartialCkt Components"))
+        left_layout.addWidget(self.component_list_label)
+        left_layout.addWidget(self.component_filter)
         left_layout.addWidget(self.component_list)
         root.addWidget(left)
 
@@ -246,15 +293,18 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(self.mapping_label)
 
         button_row = QHBoxLayout()
-        import_button = QPushButton("Import .mod/.txt")
-        import_button.clicked.connect(self.import_model_dialog)
-        validate_button = QPushButton("Validate/Convert")
-        validate_button.clicked.connect(self.validate_current_text)
-        revert_button = QPushButton("Revert")
-        revert_button.clicked.connect(self.revert_current)
-        button_row.addWidget(import_button)
-        button_row.addWidget(validate_button)
-        button_row.addWidget(revert_button)
+        self.import_button = QPushButton("Import .mod/.txt")
+        self.import_button.setToolTip("Import a SPICE model file into the editor (Ctrl+I)")
+        self.import_button.clicked.connect(self.import_model_dialog)
+        self.validate_button = QPushButton("Validate/Convert")
+        self.validate_button.setToolTip("Validate or convert the current editor text (Ctrl+Return)")
+        self.validate_button.clicked.connect(self.validate_current_text)
+        self.revert_button = QPushButton("Revert")
+        self.revert_button.setToolTip("Revert the selected component to the body stored in the SPD")
+        self.revert_button.clicked.connect(self.revert_current)
+        button_row.addWidget(self.import_button)
+        button_row.addWidget(self.validate_button)
+        button_row.addWidget(self.revert_button)
         button_row.addStretch(1)
         center_layout.addLayout(button_row)
 
@@ -280,57 +330,94 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(QLabel("Status"))
         right_layout.addWidget(self.status_log)
         root.addWidget(right)
-
         root.setSizes([300, 1100])
         self.setCentralWidget(root)
 
+    def _build_shortcuts(self) -> None:
+        self._import_shortcut = QShortcut(QKeySequence("Ctrl+I"), self)
+        self._import_shortcut.activated.connect(self.import_model_dialog)
+
+        self._filter_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
+        self._filter_shortcut.activated.connect(self._focus_component_filter)
+
+    def _focus_component_filter(self) -> None:
+        self.component_filter.setFocus()
+        self.component_filter.selectAll()
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        for action in (self.load_action, self.validate_action, self.export_action):
+            action.setEnabled(not busy)
+        for button in (self.import_button, self.validate_button):
+            button.setEnabled(not busy)
+
+    def _clear_scan_refs(self) -> None:
+        if self.sender() is self._scan_thread:
+            self._scan_thread = None
+            self._scan_worker = None
+
+    def _clear_export_refs(self) -> None:
+        if self.sender() is self._export_thread:
+            self._export_thread = None
+            self._export_worker = None
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        for thread in (self._scan_thread, self._export_thread):
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait(5000)
+        super().closeEvent(event)
+
     def load_spd_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Load SPD", "", "SPD files (*.spd);;All files (*)")
+        directory = str(self.spd_path.parent) if self.spd_path else ""
+        path, _ = QFileDialog.getOpenFileName(self, "Load SPD", directory, "SPD files (*.spd);;All files (*)")
         if path:
             self.load_spd(path)
 
     def load_spd(self, path: str | Path) -> None:
-        self.spd_path = Path(path)
+        pending_path = Path(path)
+        self._pending_spd_path = pending_path
         self.inventory = SpdInventory(blocks=[], refdes_records=[])
         self.blocks = []
         self.refdes_records = []
         self.refdes_by_component = {}
         self.refdes_component_changes.clear()
         self.refdes_component_undo_stack.clear()
-        self._update_undo_component_change_action()
         self.replacements.clear()
         self.component_list.clear()
-        self._populate_refdes_table(None)
+        if self.component_filter.text():
+            self.component_filter.blockSignals(True)
+            self.component_filter.clear()
+            self.component_filter.blockSignals(False)
+        self._update_component_header()
+        self._update_undo_component_change_action()
         if self.export_refdes_action is not None:
             self.export_refdes_action.setEnabled(False)
-        self.editor.clear()
+        self._populate_refdes_table(None)
+        self.component_label.setText("No component selected")
+        self.mapping_label.setText("Scanning for PartialCkt blocks...")
+        self._set_editor_text("")
+        self._show_validation("", error=False)
         self.status_log.clear()
-        self.status_label.setText(f"Scanning {self.spd_path.name}...")
-        self._append_status(f"Load requested: {self.spd_path}")
+        self._append_status(f"Load requested: {pending_path}")
+
+        self.status_label.setText(f"Scanning {pending_path.name}...")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setVisible(True)
+        self._set_busy(True)
         self._scan_thread = QThread(self)
-        self._scan_worker = ScanWorker(self.spd_path)
-        worker = self._scan_worker
-        worker.moveToThread(self._scan_thread)
-        self._scan_thread.started.connect(worker.run)
-        worker.progress.connect(self._scan_progress)
-        worker.finished.connect(self._scan_finished)
-        worker.failed.connect(self._worker_failed)
-        worker.finished.connect(self._scan_thread.quit)
-        worker.failed.connect(self._scan_thread.quit)
-        self._scan_thread.finished.connect(worker.deleteLater)
-        self._scan_thread.finished.connect(self._clear_scan_worker)
+        self._scan_worker = ScanWorker(pending_path)
+        self._scan_worker.moveToThread(self._scan_thread)
+        self._scan_thread.started.connect(self._scan_worker.run)
+        self._scan_worker.progress.connect(self._scan_progress)
+        self._scan_worker.finished.connect(self._scan_finished)
+        self._scan_worker.failed.connect(self._scan_failed)
+        self._scan_worker.finished.connect(self._scan_thread.quit)
+        self._scan_worker.failed.connect(self._scan_thread.quit)
+        self._scan_thread.finished.connect(self._scan_worker.deleteLater)
+        self._scan_thread.finished.connect(self._clear_scan_refs)
         self._scan_thread.start()
-
-    def _clear_scan_worker(self) -> None:
-        self._scan_worker = None
-        self._scan_thread = None
-
-    def _clear_export_worker(self) -> None:
-        self._export_worker = None
-        self._export_thread = None
 
     def _scan_progress(self, message: str, current: int, total: int) -> None:
         if total > 0:
@@ -344,6 +431,8 @@ class MainWindow(QMainWindow):
         self._append_status(detail)
 
     def _scan_finished(self, inventory: SpdInventory) -> None:
+        self.spd_path = self._pending_spd_path
+        self._pending_spd_path = None
         self.inventory = inventory
         self.blocks = inventory.blocks
         self.refdes_records = inventory.refdes_records
@@ -357,26 +446,74 @@ class MainWindow(QMainWindow):
             self.export_refdes_action.setEnabled(bool(self.refdes_records))
         self.progress.setValue(100)
         self.progress.setVisible(False)
+        self._set_busy(False)
         message = f"Loaded {len(self.blocks)} PartialCkt blocks and {len(self.refdes_records)} RefDes records."
         self.status_label.setText(message)
         self._append_status(message)
         if self.blocks:
             self.component_list.setCurrentRow(0)
-            self._populate_refdes_table(self.blocks[0].component_name)
+            self._on_current_row_changed(self.component_list.currentRow())
         else:
             self._populate_refdes_table(None)
+
+    def _scan_failed(self, message: str) -> None:
+        self._pending_spd_path = None
+        self.spd_path = None
+        self.inventory = SpdInventory(blocks=[], refdes_records=[])
+        self.blocks = []
+        self.refdes_records = []
+        self.refdes_by_component = {}
+        self.refdes_component_changes.clear()
+        self.refdes_component_undo_stack.clear()
+        self.replacements.clear()
+        self.component_list.clear()
+        self._update_component_header()
+        self._update_undo_component_change_action()
+        self._populate_refdes_table(None)
+        self.component_label.setText("No component selected")
+        self.mapping_label.setText("Load an SPD file to inspect PartialCkt blocks.")
+        self._set_editor_text("")
+        self._show_worker_error(message)
 
     def populate_components(self) -> None:
         self.component_list.clear()
         for block in self.blocks:
-            item = QListWidgetItem(self._item_text(block))
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, block.component_name)
             self.component_list.addItem(item)
+            self._style_item(item, block)
+        if self.component_filter.text():
+            self.component_filter.blockSignals(True)
+            self.component_filter.clear()
+            self.component_filter.blockSignals(False)
+        self._update_component_header()
+
+    def _apply_component_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        for row in range(self.component_list.count()):
+            item = self.component_list.item(row)
+            name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            item.setHidden(bool(needle) and needle not in name.lower())
+        self._update_component_header()
+
+    def _update_component_header(self) -> None:
+        total = self.component_list.count()
+        visible = sum(1 for row in range(total) if not self.component_list.item(row).isHidden())
+        self.component_list_label.setText(f"PartialCkt Components ({visible}/{total})")
 
     def import_model_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Import SPICE Model", "", "Model files (*.mod *.txt);;All files (*)")
-        if path:
-            self.import_model_text(Path(path).read_text(encoding="utf-8"))
+        directory = str(self.spd_path.parent) if self.spd_path else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import SPICE Model", directory, "Model files (*.mod *.txt);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            self._show_validation(f"Could not read {Path(path).name}: {exc}", error=True)
+            return
+        self.import_model_text(text)
 
     def import_model_text(self, raw_model: str) -> None:
         block = self.current_block()
@@ -420,9 +557,36 @@ class MainWindow(QMainWindow):
         if self.spd_path is None:
             QMessageBox.warning(self, "Export", "Load an SPD file first.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export New SPD", "", "SPD files (*.spd);;All files (*)")
-        if path:
-            self.export_spd(path)
+        default_path = str(self.spd_path.parent / f"{self.spd_path.stem}_injected.spd")
+        path, _ = QFileDialog.getSaveFileName(self, "Export New SPD", default_path, "SPD files (*.spd);;All files (*)")
+        if not path:
+            return
+
+        output_path = Path(path)
+        try:
+            same_as_source = output_path.resolve() == self.spd_path.resolve()
+        except OSError:
+            same_as_source = False
+        if same_as_source or output_path == self.spd_path:
+            QMessageBox.warning(
+                self,
+                "Export",
+                "Output path must differ from the source SPD file. Choose a different filename.",
+            )
+            return
+
+        if not self.replacements and not self.refdes_component_changes:
+            confirm = QMessageBox.question(
+                self,
+                "Export",
+                "No components are modified; the output will be an LF-normalized copy of the source. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        self.export_spd(output_path)
 
     def export_refdes_dialog(self) -> None:
         if not self.refdes_records:
@@ -449,10 +613,12 @@ class MainWindow(QMainWindow):
     def export_spd(self, output_path: str | Path) -> None:
         if self.spd_path is None:
             return
-        self.status_label.setText("Writing SPD output...")
+        output_path = Path(output_path)
+        self.status_label.setText(f"Writing {output_path.name}...")
         self._append_status(f"Writing SPD output: {output_path}")
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
+        self._set_busy(True)
         self._export_thread = QThread(self)
         self._export_worker = ExportWorker(
             self.spd_path,
@@ -462,28 +628,37 @@ class MainWindow(QMainWindow):
             dict(self.refdes_component_changes),
             list(self.refdes_records),
         )
-        worker = self._export_worker
-        worker.moveToThread(self._export_thread)
-        self._export_thread.started.connect(worker.run)
-        worker.finished.connect(self._export_finished)
-        worker.failed.connect(self._worker_failed)
-        worker.finished.connect(self._export_thread.quit)
-        worker.failed.connect(self._export_thread.quit)
-        self._export_thread.finished.connect(worker.deleteLater)
-        self._export_thread.finished.connect(self._clear_export_worker)
+        self._export_worker.moveToThread(self._export_thread)
+        self._export_thread.started.connect(self._export_worker.run)
+        self._export_worker.finished.connect(self._export_finished)
+        self._export_worker.failed.connect(self._show_worker_error)
+        self._export_worker.finished.connect(self._export_thread.quit)
+        self._export_worker.failed.connect(self._export_thread.quit)
+        self._export_thread.finished.connect(self._export_worker.deleteLater)
+        self._export_thread.finished.connect(self._clear_export_refs)
         self._export_thread.start()
 
     def _export_finished(self, output_path: str) -> None:
         self.progress.setVisible(False)
-        message = f"Exported {output_path}"
+        self._set_busy(False)
+        message = f"Exported to {output_path}"
         self.status_label.setText(message)
         self._append_status(message)
 
-    def _worker_failed(self, message: str) -> None:
+    def _show_worker_error(self, message: str) -> None:
         self.progress.setVisible(False)
+        self._set_busy(False)
         self.status_label.setText("Operation failed.")
         self._append_status(f"Operation failed: {message}")
-        QMessageBox.critical(self, "SPD Model Injector", message)
+        box = QMessageBox(
+            QMessageBox.Icon.Critical,
+            "SPD Model Injector",
+            message,
+            QMessageBox.StandardButton.Ok,
+            self,
+        )
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.open()
 
     def _on_current_row_changed(self, row: int) -> None:
         if row < 0 or row >= len(self.blocks):
@@ -512,9 +687,16 @@ class MainWindow(QMainWindow):
         if self.spd_path is None:
             self._set_editor_text("")
             return
-        self.status_label.setText(f"Loading body for {block.component_name}...")
-        self._append_status(f"Loading body for {block.component_name}")
-        self._set_editor_text(read_block_body(self.spd_path, block))
+        try:
+            body = read_block_body(self.spd_path, block)
+        except OSError as exc:
+            self._set_editor_text("")
+            message = f"Could not read {self.spd_path.name}: {exc}"
+            self._show_validation(message, error=True)
+            self.status_label.setText(message)
+            self._append_status(message)
+            return
+        self._set_editor_text(body)
         self.status_label.setText(f"Loaded body for {block.component_name}.")
 
     def _set_editor_text(self, text: str) -> None:
@@ -538,9 +720,25 @@ class MainWindow(QMainWindow):
             ext_preview += f" ... (+{len(block.ext_nodes) - 20} more)"
         self.mapping_label.setText(f"ExtNode ({block.port_count}): {ext_preview}{model_info}")
 
+    def _is_dark_palette(self) -> bool:
+        return self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+    def _modified_color(self) -> QColor:
+        return QColor("#fbbf24") if self._is_dark_palette() else QColor("#b45309")
+
     def _show_validation(self, message: str, *, error: bool) -> None:
-        color = "#b91c1c" if error else "#065f46"
-        self.validation_label.setText(f"<span style='color:{color}'>{message}</span>")
+        if not message:
+            self.validation_label.setText("")
+            return
+        dark = self._is_dark_palette()
+        if error:
+            color = "#f87171" if dark else "#b91c1c"
+            style = f"color:{color};font-weight:bold;"
+        else:
+            color = "#34d399" if dark else "#065f46"
+            style = f"color:{color};"
+        escaped = html.escape(message)
+        self.validation_label.setText(f"<span style='{style}'>{escaped}</span>")
 
     def _populate_refdes_table(self, component_name: str | None) -> None:
         self.refdes_table.setRowCount(0)
@@ -785,10 +983,24 @@ class MainWindow(QMainWindow):
         row = self.component_list.currentRow()
         if block is None or row < 0:
             return
-        self.component_list.item(row).setText(self._item_text(block))
+        self._style_item(self.component_list.item(row), block)
+
+    def _style_item(self, item: QListWidgetItem, block: PartialCktBlock) -> None:
+        item.setText(self._item_text(block))
+        modified = block.component_name in self.replacements
+        font = item.font()
+        font.setBold(modified)
+        item.setFont(font)
+        if modified:
+            item.setForeground(self._modified_color())
+        else:
+            item.setData(Qt.ItemDataRole.ForegroundRole, None)
 
     def _item_text(self, block: PartialCktBlock) -> str:
-        return block.component_name
+        modified = block.component_name in self.replacements
+        marker = "* " if modified else ""
+        state = "modified" if modified else "existing"
+        return f"{marker}{block.component_name}\nports: {block.port_count}  {state}"
 
     def _append_status(self, message: str) -> None:
         self.status_log.appendPlainText(message)
@@ -803,6 +1015,8 @@ def _first_supported_refdes_change_path(mime_data) -> Path | None:
     if not mime_data.hasUrls():
         return None
     for url in mime_data.urls():
+        if not url.isLocalFile():
+            continue
         path = Path(url.toLocalFile())
         if path.is_file() and path.suffix.lower() in {".csv", ".xlsx"}:
             return path

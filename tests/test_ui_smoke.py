@@ -1,14 +1,40 @@
 import os
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QSplitter
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QPlainTextEdit, QSplitter
 
 from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, SpdInventory
 from spd_model_injector.ui.main_window import MainWindow
+
+
+def _spin_until(app: QApplication, predicate, timeout: float, what: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError(f"Timed out after {timeout}s waiting for: {what}")
+
+
+def _make_block(name: str, ext_nodes: list[str] | None = None) -> PartialCktBlock:
+    ext_nodes = ext_nodes if ext_nodes is not None else ["1", "2"]
+    return PartialCktBlock(
+        component_name=name,
+        ext_nodes=ext_nodes,
+        start_line=1,
+        end_line=3,
+        block_start_offset=0,
+        body_start_offset=30,
+        body_end_offset=40,
+        block_end_offset=55,
+        header_lines=[f".PartialCkt {name} ExtNode =  " + " ".join(ext_nodes)],
+    )
 
 
 def test_main_window_has_expected_title_and_empty_initial_state() -> None:
@@ -64,21 +90,11 @@ def test_main_window_refdes_list_has_framed_sortable_resizable_columns() -> None
 def test_main_window_import_model_text_maps_selected_block_ports(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
-    block = PartialCktBlock(
-        component_name="C1",
-        ext_nodes=["1", "2"],
-        start_line=1,
-        end_line=3,
-        block_start_offset=0,
-        body_start_offset=30,
-        body_end_offset=40,
-        block_end_offset=55,
-        header_lines=[".PartialCkt C1 ExtNode =  1 2"],
-    )
+    block = _make_block("C1")
     window.spd_path = tmp_path / "board.spd"
     window.blocks = [block]
     window.populate_components()
-    assert window.component_list.item(0).text() == 'C1'
+    assert window.component_list.item(0).text().startswith("C1")
     window.component_list.setCurrentRow(0)
 
     window.import_model_text(".SUBCKT CAP Port1 Port2\nC1 Port1 Port2 1u\n.ENDS CAP\n")
@@ -91,17 +107,7 @@ def test_main_window_import_model_text_maps_selected_block_ports(tmp_path: Path)
 def test_main_window_refdes_table_follows_selected_component(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
-    cap_block = PartialCktBlock(
-        component_name="CAP_0402",
-        ext_nodes=["1", "2"],
-        start_line=1,
-        end_line=3,
-        block_start_offset=0,
-        body_start_offset=30,
-        body_end_offset=40,
-        block_end_offset=55,
-        header_lines=[".PartialCkt CAP_0402 ExtNode =  1 2"],
-    )
+    cap_block = _make_block("CAP_0402")
     res_block = PartialCktBlock(
         component_name="RES_0402",
         ext_nodes=["A", "B"],
@@ -145,17 +151,7 @@ def test_main_window_refdes_table_follows_selected_component(tmp_path: Path) -> 
 def test_main_window_changes_multiple_refdes_components_and_undoes_batch(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
-    cap_block = PartialCktBlock(
-        component_name="CAP_0402",
-        ext_nodes=["1", "2"],
-        start_line=1,
-        end_line=3,
-        block_start_offset=0,
-        body_start_offset=30,
-        body_end_offset=40,
-        block_end_offset=55,
-        header_lines=[".PartialCkt CAP_0402 ExtNode =  1 2"],
-    )
+    cap_block = _make_block("CAP_0402")
     res_block = PartialCktBlock(
         component_name="RES_0402",
         ext_nodes=["A", "B"],
@@ -228,28 +224,8 @@ def test_main_window_refdes_excel_export_uses_changed_components(tmp_path: Path)
 def test_main_window_refdes_component_undo_stack_keeps_ten_batches(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
-    block_a = PartialCktBlock(
-        component_name="A",
-        ext_nodes=["1"],
-        start_line=1,
-        end_line=2,
-        block_start_offset=0,
-        body_start_offset=10,
-        body_end_offset=11,
-        block_end_offset=12,
-        header_lines=[".PartialCkt A ExtNode =  1"],
-    )
-    block_b = PartialCktBlock(
-        component_name="B",
-        ext_nodes=["1"],
-        start_line=3,
-        end_line=4,
-        block_start_offset=13,
-        body_start_offset=20,
-        body_end_offset=21,
-        block_end_offset=22,
-        header_lines=[".PartialCkt B ExtNode =  1"],
-    )
+    block_a = PartialCktBlock("A", ["1"], 1, 2, 0, 10, 11, 12, [".PartialCkt A ExtNode =  1"])
+    block_b = PartialCktBlock("B", ["1"], 3, 4, 13, 20, 21, 22, [".PartialCkt B ExtNode =  1"])
     window.blocks = [block_a, block_b]
     window.refdes_records = [RefDesRecord(component_name="A", refdes_name=f"C{i}", activation_status="Automatic") for i in range(11)]
     window.rebuild_refdes_groups()
@@ -301,6 +277,90 @@ def test_main_window_rejects_invalid_refdes_component_import_without_changes(tmp
     assert window.refdes_component_changes == {}
 
 
+def test_component_filter_hides_non_matching_rows_and_updates_header() -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("C1"), _make_block("C2"), _make_block("R1")]
+    window.populate_components()
+
+    assert window.component_list_label.text() == "PartialCkt Components (3/3)"
+
+    window.component_filter.setText("c")
+
+    visible_rows = [row for row in range(window.component_list.count()) if not window.component_list.item(row).isHidden()]
+    hidden_rows = [row for row in range(window.component_list.count()) if window.component_list.item(row).isHidden()]
+    assert len(visible_rows) == 2
+    assert len(hidden_rows) == 1
+    assert window.component_list_label.text() == "PartialCkt Components (2/3)"
+    assert window.component_list.count() == 3
+
+    window.component_filter.setText("")
+    assert window.component_list_label.text() == "PartialCkt Components (3/3)"
+
+
+def test_modified_item_is_visually_marked_after_import(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    block = _make_block("C1")
+    window.spd_path = tmp_path / "board.spd"
+    window.blocks = [block]
+    window.populate_components()
+    window.component_list.setCurrentRow(0)
+
+    item_before = window.component_list.item(0)
+    assert not item_before.font().bold()
+    assert not item_before.text().startswith("* ")
+
+    window.import_model_text(".SUBCKT CAP Port1 Port2\nC1 Port1 Port2 1u\n.ENDS CAP\n")
+
+    item_after = window.component_list.item(0)
+    assert item_after.font().bold()
+    assert item_after.text().startswith("* ")
+    assert "ports: 2" in item_after.text()
+
+
+def test_load_block_body_missing_file_shows_error_and_leaves_editor_empty(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    block = _make_block("C1")
+    window.spd_path = tmp_path / "missing.spd"
+    window.blocks = [block]
+    window.populate_components()
+
+    window.component_list.setCurrentRow(0)
+
+    assert window.editor.toPlainText() == ""
+    assert "error" in window.validation_label.text().lower() or "could not read" in window.validation_label.text().lower()
+    assert "could not read" in window.status_label.text().lower()
+
+
+def test_busy_state_disables_load_export_validate_actions_and_buttons() -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    assert window.load_action.isEnabled()
+    assert window.export_action.isEnabled()
+    assert window.validate_action.isEnabled()
+    assert window.import_button.isEnabled()
+    assert window.validate_button.isEnabled()
+
+    window._set_busy(True)
+
+    assert not window.load_action.isEnabled()
+    assert not window.export_action.isEnabled()
+    assert not window.validate_action.isEnabled()
+    assert not window.import_button.isEnabled()
+    assert not window.validate_button.isEnabled()
+
+    window._set_busy(False)
+
+    assert window.load_action.isEnabled()
+    assert window.export_action.isEnabled()
+    assert window.validate_action.isEnabled()
+    assert window.import_button.isEnabled()
+    assert window.validate_button.isEnabled()
+
+
 def test_main_window_load_spd_populates_components_from_worker(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     spd_path = tmp_path / "board.spd"
@@ -336,3 +396,41 @@ def test_main_window_load_spd_populates_components_from_worker(tmp_path: Path) -
     assert window.refdes_table.item(0, 0).text() == "C100_0"
     assert window.refdes_table.item(0, 1).text() == "Automatic"
     assert "Loaded 1 PartialCkt blocks" in window.status_log.toPlainText()
+
+
+def test_load_spd_real_threaded_scan_completes(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    spd = tmp_path / "board.spd"
+    spd.write_text(
+        ".PartialCkt C1 ExtNode =  1 2\nC 1 2 1u\n.EndPartialCkt\n"
+        ".PartialCkt U1 ExtNode =  A B\nR A B 1\n.EndPartialCkt\n",
+        newline="\n",
+    )
+
+    window.load_spd(spd)
+    assert window._busy, "busy state should be set while the scan runs"
+    assert window._scan_worker is not None, "worker must be strongly referenced during the scan"
+
+    _spin_until(app, lambda: not window._busy, timeout=15.0, what="threaded scan to finish")
+
+    assert window.spd_path == spd
+    assert len(window.blocks) == 2
+    assert window.component_list.count() == 2
+    assert "2/2" in window.component_list_label.text()
+    assert window.load_action.isEnabled()
+
+    _spin_until(
+        app,
+        lambda: window._scan_thread is None and window._scan_worker is None,
+        timeout=15.0,
+        what="scan thread/worker refs to be cleared",
+    )
+
+
+def test_editor_uses_fixed_pitch_font_and_no_wrap() -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    assert window.editor.font().fixedPitch()
+    assert window.editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.NoWrap

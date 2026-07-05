@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from spd_model_injector.core import spd
 from spd_model_injector.core.spd import read_block_body, scan_spd, scan_spd_inventory, write_spd_with_replacements
 
 
@@ -45,10 +48,11 @@ def test_scan_spd_reports_progress_while_searching_large_files(tmp_path: Path) -
     assert [block.component_name for block in blocks] == ["C1"]
     assert events[0][0] == "Opening SPD file"
     assert any(message.startswith("Found C1") for message, _, _ in events)
-    assert events[-1][0] == "Scan complete: 1 PartialCkt blocks"
+    assert events[-1][0] == "Scan complete: 1 PartialCkt blocks, 0 RefDes records"
     assert events[-1][1] == events[-1][2] == spd_path.stat().st_size
 
-def test_scan_spd_does_not_decode_partialckt_body_lines(tmp_path: Path) -> None:
+
+def test_scan_spd_handles_non_utf8_partialckt_body_lines(tmp_path: Path) -> None:
     spd_path = tmp_path / "board.spd"
     spd_path.write_bytes(
         b"Title\n"
@@ -221,3 +225,104 @@ def test_write_spd_combines_partialckt_body_and_refdes_component_changes(tmp_pat
         ".EndPartialCkt\n"
         ".Connect C100_0 CAP_0603 Checked = 1\n"
     )
+
+
+def test_write_spd_refuses_to_overwrite_source(tmp_path: Path) -> None:
+    spd_path = tmp_path / "board.spd"
+    original = (
+        "Title Example\n"
+        ".PartialCkt C1 ExtNode =  1 2\n"
+        "C 1 2 1u\n"
+        ".EndPartialCkt\n"
+    )
+    spd_path.write_text(original, encoding="utf-8", newline="\n")
+    blocks = scan_spd(spd_path)
+
+    with pytest.raises(ValueError, match="differ from the source"):
+        write_spd_with_replacements(spd_path, spd_path, blocks, {"C1": "C01 1 2 1p\n"})
+
+    with pytest.raises(ValueError, match="differ from the source"):
+        write_spd_with_replacements(spd_path, tmp_path / "." / "board.spd", blocks, {"C1": "C01 1 2 1p\n"})
+
+    assert spd_path.read_text(encoding="utf-8") == original
+
+
+def test_write_spd_normalizes_crlf_source_to_lf(tmp_path: Path) -> None:
+    spd_path = tmp_path / "board.spd"
+    output_path = tmp_path / "board_out.spd"
+    spd_path.write_bytes(
+        b"Title Example\r\n"
+        b".PartialCkt C1 ExtNode =  1 2\r\n"
+        b"C 1 2 1u\r\n"
+        b".EndPartialCkt\r\n"
+        b".PartialCkt U1 ExtNode =  A B C\r\n"
+        b"+ D\r\n"
+        b"R A B 1\r\n"
+        b".EndPartialCkt\r\n"
+    )
+    blocks = scan_spd(spd_path)
+
+    write_spd_with_replacements(spd_path, output_path, blocks, {"C1": "* new\r\nC01 1 2 1p\r\n"})
+
+    output_bytes = output_path.read_bytes()
+    assert b"\r" not in output_bytes
+    assert output_path.read_text(encoding="utf-8") == (
+        "Title Example\n"
+        ".PartialCkt C1 ExtNode =  1 2\n"
+        "* new\n"
+        "C01 1 2 1p\n"
+        ".EndPartialCkt\n"
+        ".PartialCkt U1 ExtNode =  A B C\n"
+        "+ D\n"
+        "R A B 1\n"
+        ".EndPartialCkt\n"
+    )
+
+
+def test_write_spd_normalizes_crlf_across_chunk_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    spd_path = tmp_path / "board.spd"
+    output_path = tmp_path / "board_out.spd"
+    spd_path.write_bytes(b"ABC\r\nDEF\r\nGHI\r\n")
+    monkeypatch.setattr(spd, "_CHUNK_SIZE", 4)
+
+    write_spd_with_replacements(spd_path, output_path, [], {})
+
+    assert output_path.read_bytes() == b"ABC\nDEF\nGHI\n"
+
+
+def test_scan_spd_tolerates_non_utf8_bytes(tmp_path: Path) -> None:
+    spd_path = tmp_path / "board.spd"
+    spd_path.write_bytes(
+        b"* vendor \xff comment\n"
+        b".PartialCkt C1 ExtNode =  1 2\n"
+        b"C 1 \xff 2 1u\n"
+        b".EndPartialCkt\n"
+    )
+
+    blocks = scan_spd(spd_path)
+
+    assert [block.component_name for block in blocks] == ["C1"]
+    assert blocks[0].ext_nodes == ["1", "2"]
+    assert read_block_body(spd_path, blocks[0]).startswith("C 1 ")
+
+
+def test_scan_spd_handles_mixed_case_markers_and_word_boundaries(tmp_path: Path) -> None:
+    spd_path = tmp_path / "board.spd"
+    spd_path.write_text(
+        ".PARTIALCKT C1 EXTNODE =  1 2\n"
+        ".EndPartialCktExtra keep-me\n"
+        "C 1 2 1u\n"
+        ".endpartialckt\n"
+        ".PartialCktX NOTABLOCK\n"
+        "Tail\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    blocks = scan_spd(spd_path)
+
+    assert [block.component_name for block in blocks] == ["C1"]
+    assert blocks[0].ext_nodes == ["1", "2"]
+    body = read_block_body(spd_path, blocks[0])
+    assert ".EndPartialCktExtra keep-me" in body
+    assert "C 1 2 1u" in body
