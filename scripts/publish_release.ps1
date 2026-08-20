@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.7",
+    [string]$Version = "0.1.8",
     [string]$Repo = "spd-model-injector"
 )
 
@@ -25,4 +25,4 @@ if (-not (Test-Path $installer)) {
     throw "Installer artifact not found: $installer. Run scripts/build.ps1 first."
 }
 
-gh release create "v$Version" $installer --title "SPD Model Injector v$Version" --notes "Adds alternate-header and partial RefDes activation-status Excel imports, plus Net Name data in RefDes Excel exports."
+gh release create "v$Version" $installer --title "SPD Model Injector v$Version" --notes "Verified four-column RefDes Excel export/import workflow: exports include Net Name, and the same file can be drag-and-drop reimported without warnings while applying edited Activation Status values. Partial selected-RefDes imports and legacy full-inventory imports remain supported."
