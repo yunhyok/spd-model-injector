@@ -1,17 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 import re
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 _PARTIAL_RE = re.compile(r"^\.PartialCkt\s+(.+?)\s+ExtNode\s*=\s*(.*)$", re.IGNORECASE)
 _PARTIAL_START_RE = re.compile(r"^\.PartialCkt(?:\s|$)", re.IGNORECASE)
 _END_PARTIAL_RE = re.compile(r"^\.EndPartialCkt(?:\s|$)", re.IGNORECASE)
+_CONNECT_RE = re.compile(r"^\.Connect\s+(\S+)\s+(\S+)(?:\s+(.*))?$", re.IGNORECASE)
+_END_CONNECT_RE = re.compile(r"^\.EndC(?:\s|$)", re.IGNORECASE)
+# Connection entries use numeric pins for discrete parts and alphanumeric pins
+# (for example ``A10`` or ``LGA_A10``) for DUT/LGA packages.  Requiring the
+# package-node token avoids mistaking ``Usage = ...`` or ``.EndC`` for a pin.
+_CONNECT_NODE_RE = re.compile(r"^\s*[A-Za-z0-9_./+-]+\s+\$Package\.Node\S*(?:\s|$)", re.IGNORECASE)
+_USAGE_RE = re.compile(r"\bUsage\s*=\s*(\S+)", re.IGNORECASE)
+_USAGE_ASSIGNMENT_RE = re.compile(r"\s+Usage\s*=\s*\S+", re.IGNORECASE)
 
 _CHUNK_SIZE = 1024 * 1024
+ProgressCallback = Callable[[str, int, int], None]
 
 
 @dataclass(frozen=True)
@@ -31,13 +40,46 @@ class PartialCktBlock:
         return len(self.ext_nodes)
 
 
-def scan_spd(path: str | Path) -> list[PartialCktBlock]:
-    """Scan an SPD file for PartialCkt blocks without loading the file into memory."""
+@dataclass(frozen=True)
+class RefDesRecord:
+    component_name: str
+    refdes_name: str
+    activation_status: str
+    connect_line_start_offset: int | None = None
+    connect_line_end_offset: int | None = None
+    connect_line: str | None = None
+    net_name: str = ""
+
+
+@dataclass(frozen=True)
+class SpdInventory:
+    blocks: list[PartialCktBlock]
+    refdes_records: list[RefDesRecord]
+    refdes_by_component: dict[str, list[RefDesRecord]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        grouped: dict[str, list[RefDesRecord]] = {}
+        for record in self.refdes_records:
+            grouped.setdefault(record.component_name, []).append(record)
+        object.__setattr__(self, "refdes_by_component", grouped)
+
+
+def scan_spd(path: str | Path, progress_callback: ProgressCallback | None = None) -> list[PartialCktBlock]:
+    return scan_spd_inventory(path, progress_callback).blocks
+
+
+def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | None = None) -> SpdInventory:
+    """Scan an SPD file for PartialCkt blocks and RefDes links without loading bodies into memory."""
     spd_path = Path(path)
     blocks: list[PartialCktBlock] = []
+    refdes_records: list[RefDesRecord] = []
     line_no = 0
+    file_size = spd_path.stat().st_size
+    _report_progress(progress_callback, "Opening SPD file", 0, file_size)
 
-    with spd_path.open("rb", buffering=1024 * 1024) as handle:
+    with spd_path.open("rb", buffering=_CHUNK_SIZE) as handle:
+        active_connect: RefDesRecord | None = None
+        active_connect_net_seen = False
         while True:
             line_start = handle.tell()
             raw_line = handle.readline()
@@ -45,66 +87,107 @@ def scan_spd(path: str | Path) -> list[PartialCktBlock]:
                 break
             line_no += 1
             line_text = _decode_line(raw_line)
-            if not _PARTIAL_START_RE.match(line_text):
-                continue
 
-            block_start_offset = line_start
-            start_line = line_no
-            header_lines = [_strip_newline(line_text)]
-            body_start_offset = handle.tell()
-            pending: tuple[int, bytes, str, int] | None = None
-
-            while True:
-                next_start = handle.tell()
-                next_raw = handle.readline()
-                if not next_raw:
-                    break
-                line_no += 1
-                next_text = _decode_line(next_raw)
-                if next_text.lstrip().startswith("+"):
-                    header_lines.append(_strip_newline(next_text))
-                    body_start_offset = handle.tell()
+            if active_connect is not None:
+                if _END_CONNECT_RE.match(_strip_newline(line_text)):
+                    refdes_records.append(active_connect)
+                    active_connect = None
+                    active_connect_net_seen = False
                     continue
-                pending = (next_start, next_raw, next_text, line_no)
-                break
+                # Use the first node entry that actually carries a ``::Net``;
+                # some DUT/LGA blocks have unannotated pins before the net-bearing entry.
+                if not active_connect_net_seen and _CONNECT_NODE_RE.match(line_text) and "::" in line_text:
+                    net_name = line_text.split("::", 1)[1].strip()
+                    if net_name:
+                        active_connect = _replace_record_net_name(active_connect, net_name)
+                        active_connect_net_seen = True
+                # A malformed block may omit .EndC; preserve the old scanner's
+                # behavior by allowing a new .Connect to terminate the prior one.
+                if _CONNECT_RE.match(_strip_newline(line_text)):
+                    refdes_records.append(active_connect)
+                    active_connect = None
+                    active_connect_net_seen = False
 
-            body_end_offset = body_start_offset
-            end_line = line_no
-            block_end_offset = body_start_offset
+            if _PARTIAL_START_RE.match(line_text):
+                block_start_offset = line_start
+                start_line = line_no
+                header_lines = [_strip_newline(line_text)]
+                body_start_offset = handle.tell()
+                pending: tuple[int, bytes, str, int] | None = None
 
-            if pending is not None:
-                current_start, current_raw, current_text, current_line = pending
                 while True:
-                    if _END_PARTIAL_RE.match(current_text):
-                        body_end_offset = current_start
-                        end_line = current_line
-                        block_end_offset = current_start + len(current_raw)
-                        break
-                    current_start = handle.tell()
-                    current_raw = handle.readline()
-                    if not current_raw:
-                        body_end_offset = handle.tell()
-                        block_end_offset = handle.tell()
+                    next_start = handle.tell()
+                    next_raw = handle.readline()
+                    if not next_raw:
                         break
                     line_no += 1
-                    current_line = line_no
-                    current_text = _decode_line(current_raw)
+                    next_text = _decode_line(next_raw)
+                    if next_text.lstrip().startswith("+"):
+                        header_lines.append(_strip_newline(next_text))
+                        body_start_offset = handle.tell()
+                        continue
+                    pending = (next_start, next_raw, next_text, line_no)
+                    break
 
-            blocks.append(
-                PartialCktBlock(
-                    component_name=_parse_component_name(header_lines[0]),
-                    ext_nodes=_parse_ext_nodes(header_lines),
-                    start_line=start_line,
-                    end_line=end_line,
-                    block_start_offset=block_start_offset,
-                    body_start_offset=body_start_offset,
-                    body_end_offset=body_end_offset,
-                    block_end_offset=block_end_offset,
-                    header_lines=header_lines,
+                body_end_offset = body_start_offset
+                end_line = line_no
+                block_end_offset = body_start_offset
+
+                if pending is not None:
+                    current_start, current_raw, current_text, current_line = pending
+                    while True:
+                        if _END_PARTIAL_RE.match(current_text):
+                            body_end_offset = current_start
+                            end_line = current_line
+                            block_end_offset = current_start + len(current_raw)
+                            break
+                        current_start = handle.tell()
+                        current_raw = handle.readline()
+                        if not current_raw:
+                            body_end_offset = handle.tell()
+                            block_end_offset = handle.tell()
+                            break
+                        line_no += 1
+                        current_line = line_no
+                        current_text = _decode_line(current_raw)
+
+                component_name = _parse_component_name(header_lines[0])
+                blocks.append(
+                    PartialCktBlock(
+                        component_name=component_name,
+                        ext_nodes=_parse_ext_nodes(header_lines),
+                        start_line=start_line,
+                        end_line=end_line,
+                        block_start_offset=block_start_offset,
+                        body_start_offset=body_start_offset,
+                        body_end_offset=body_end_offset,
+                        block_end_offset=block_end_offset,
+                        header_lines=header_lines,
+                    )
                 )
-            )
+                _report_progress(
+                    progress_callback,
+                    f"Found {component_name} at line {start_line}",
+                    block_end_offset,
+                    file_size,
+                )
+                continue
 
-    return blocks
+            record = _parse_connect_line(line_text, start_offset=line_start, end_offset=line_start + len(raw_line))
+            if record is not None:
+                active_connect = record
+                active_connect_net_seen = False
+
+        if active_connect is not None:
+            refdes_records.append(active_connect)
+
+    _report_progress(
+        progress_callback,
+        f"Scan complete: {len(blocks)} PartialCkt blocks, {len(refdes_records)} RefDes records",
+        file_size,
+        file_size,
+    )
+    return SpdInventory(blocks=blocks, refdes_records=refdes_records)
 
 
 def read_block_body(path: str | Path, block: PartialCktBlock) -> str:
@@ -119,16 +202,41 @@ def write_spd_with_replacements(
     output_path: str | Path,
     blocks: Sequence[PartialCktBlock],
     replacements: Mapping[str, str],
+    *,
+    refdes_component_changes: Mapping[str, str] | None = None,
+    refdes_activation_status_changes: Mapping[str, str] | None = None,
+    refdes_records: Sequence[RefDesRecord] | None = None,
 ) -> None:
-    """Write a new SPD, replacing only the body ranges for selected components."""
+    """Write a new SPD, replacing selected bodies and RefDes component links."""
     source = Path(source_path)
     output = Path(output_path)
     _ensure_output_is_not_source(source, output)
-    replacement_by_offset = {
+    replacement_by_offset: dict[int, tuple[str, int]] = {
         block.body_start_offset: (_normalize_model_text(replacements[block.component_name]), block.body_end_offset)
         for block in blocks
         if block.component_name in replacements
     }
+
+    if refdes_component_changes or refdes_activation_status_changes:
+        component_changes = refdes_component_changes or {}
+        status_changes = refdes_activation_status_changes or {}
+        records = refdes_records if refdes_records is not None else scan_spd_inventory(source).refdes_records
+        for record in records:
+            new_component = component_changes.get(record.refdes_name)
+            new_status = status_changes.get(record.refdes_name)
+            if new_component is None and new_status is None:
+                continue
+            if record.connect_line_start_offset is None or record.connect_line_end_offset is None or record.connect_line is None:
+                raise ValueError(f"RefDes {record.refdes_name} does not include .Connect line metadata.")
+            connect_line = record.connect_line
+            if new_component is not None:
+                connect_line = _replace_connect_component(connect_line, new_component)
+            if new_status is not None:
+                connect_line = _replace_connect_activation_status(connect_line, new_status)
+            replacement_by_offset[record.connect_line_start_offset] = (
+                _normalize_newlines(connect_line),
+                record.connect_line_end_offset,
+            )
 
     with source.open("rb", buffering=_CHUNK_SIZE) as src, output.open("wb", buffering=_CHUNK_SIZE) as dst:
         cursor = 0
@@ -200,8 +308,85 @@ def _parse_ext_nodes(header_lines: Sequence[str]) -> list[str]:
     return [token for token in " ".join(ext_text).split() if token]
 
 
+def _parse_connect_line(
+    line: str,
+    *,
+    start_offset: int | None = None,
+    end_offset: int | None = None,
+) -> RefDesRecord | None:
+    match = _CONNECT_RE.match(_strip_newline(line))
+    if not match:
+        return None
+    return RefDesRecord(
+        component_name=match.group(2),
+        refdes_name=match.group(1),
+        activation_status=_activation_status(match.group(3) or ""),
+        connect_line_start_offset=start_offset,
+        connect_line_end_offset=end_offset,
+        connect_line=line,
+    )
+
+
+def _replace_record_net_name(record: RefDesRecord, net_name: str) -> RefDesRecord:
+    return RefDesRecord(
+        component_name=record.component_name,
+        refdes_name=record.refdes_name,
+        activation_status=record.activation_status,
+        net_name=net_name,
+        connect_line_start_offset=record.connect_line_start_offset,
+        connect_line_end_offset=record.connect_line_end_offset,
+        connect_line=record.connect_line,
+    )
+
+
+def _replace_connect_component(line: str, component_name: str) -> str:
+    match = re.match(r"^(\.Connect\s+\S+\s+)(\S+)(.*)$", line, re.IGNORECASE | re.DOTALL)
+    if not match:
+        raise ValueError(f"Invalid .Connect line: {_strip_newline(line)}")
+    return f"{match.group(1)}{component_name}{match.group(3)}"
+
+
+def _replace_connect_activation_status(line: str, activation_status: str) -> str:
+    usage = _usage_for_activation_status(activation_status)
+    if usage is None:
+        return _USAGE_ASSIGNMENT_RE.sub("", line, count=1)
+    if _USAGE_ASSIGNMENT_RE.search(line):
+        return re.sub(r"(Usage\s*=\s*)\S+", rf"\g<1>{usage}", line, count=1, flags=re.IGNORECASE)
+    match = re.match(r"^(\.Connect\s+\S+\s+\S+)(.*)$", line, re.IGNORECASE | re.DOTALL)
+    if not match:
+        raise ValueError(f"Invalid .Connect line: {_strip_newline(line)}")
+    return f"{match.group(1)} Usage = {usage}{match.group(2)}"
+
+
+def _usage_for_activation_status(activation_status: str) -> str | None:
+    if activation_status == "Automatic":
+        return None
+    if activation_status == "Enabled":
+        return "0b1000"
+    if activation_status == "Disabled":
+        return "0b111000"
+    raise ValueError(f"Unknown activation status: {activation_status}")
+
+
+def _activation_status(attributes: str) -> str:
+    match = _USAGE_RE.search(attributes)
+    if not match:
+        return "Automatic"
+    usage = match.group(1)
+    if usage == "0b1000":
+        return "Enabled"
+    if usage == "0b111000":
+        return "Disabled"
+    return "Unknown"
+
+
 def _decode_line(raw_line: bytes) -> str:
     return raw_line.decode("utf-8", errors="replace")
+
+
+def _report_progress(callback: ProgressCallback | None, message: str, current: int, total: int) -> None:
+    if callback is not None:
+        callback(message, current, total)
 
 
 def _strip_newline(line: str) -> str:
