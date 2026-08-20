@@ -263,7 +263,7 @@ def test_main_window_imports_refdes_status_excel_with_legacy_header(tmp_path: Pa
     assert "Imported 3 RefDes activation status" in window.status_log.toPlainText()
 
 
-def test_main_window_imports_four_column_refdes_export(tmp_path: Path) -> None:
+def test_main_window_imports_four_column_refdes_export(tmp_path: Path, monkeypatch) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
     window.blocks = [_make_block("CAP_0402")]
@@ -273,10 +273,33 @@ def test_main_window_imports_four_column_refdes_export(tmp_path: Path) -> None:
     status_path = tmp_path / "status_export.xlsx"
     window.export_refdes_excel(status_path)
 
-    window.import_refdes_status_file(status_path)
+    # A user should be able to edit the exported workbook in place and import
+    # it again.  Keep the nonblank Net Name column from the export so this
+    # exercises the real four-column round trip rather than a hand-authored
+    # three-column status file.
+    workbook = load_workbook(status_path)
+    sheet = workbook.active
+    assert tuple(cell.value for cell in sheet[1]) == (
+        "Component",
+        "RefDes Name",
+        "Activation Status",
+        "Net Name",
+    )
+    assert sheet.cell(row=2, column=4).value == "5V_A"
+    sheet.cell(row=2, column=3).value = "Disabled"
+    workbook.save(status_path)
+    workbook.close()
 
-    assert window.refdes_activation_status_changes == {}
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, _title, message: warnings.append(message))
+
+    # Use the same auto-routing path used by the RefDes table drag/drop UI.
+    window.import_refdes_drop_file(status_path)
+
+    assert window.refdes_activation_status_changes == {"C100_0": "Disabled"}
+    assert window.effective_activation_status_for_refdes("C100_0") == "Disabled"
     assert window.validate_refdes_status_file(status_path) == []
+    assert warnings == []
 
 
 def test_main_window_accepts_partial_refdes_status_excel_and_rejects_unexpected_names(tmp_path: Path) -> None:
