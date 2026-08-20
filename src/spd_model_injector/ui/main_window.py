@@ -146,12 +146,16 @@ IMPORTABLE_ACTIVATION_STATUSES = (*VALID_ACTIVATION_STATUSES, "Unknown")
 LEGACY_REFDES_STATUS_HEADER = ("Component", "RefDes Name", "Activation Status")
 LEGACY_REFDES_STATUS_EXPORT_HEADER = (*LEGACY_REFDES_STATUS_HEADER, "Net Name")
 PARTIAL_REFDES_STATUS_HEADER = ("Component type", "REFDES", "Status")
+REFDES_STATUS_HEADER = ("RefDes", "Status")
 REFDES_STATUS_HEADERS = (
     LEGACY_REFDES_STATUS_HEADER,
     LEGACY_REFDES_STATUS_EXPORT_HEADER,
     PARTIAL_REFDES_STATUS_HEADER,
+    REFDES_STATUS_HEADER,
 )
 REFDES_STATUS_HEADER_TOKENS = frozenset(value for header in REFDES_STATUS_HEADERS for value in header)
+IMPORTABLE_ACTIVATION_STATUS_TOKENS = frozenset(status.casefold() for status in IMPORTABLE_ACTIVATION_STATUSES)
+REFDES_STATUS_HEADER_TOKENS_CASEFOLD = frozenset(value.casefold() for value in REFDES_STATUS_HEADER_TOKENS)
 
 
 class MainWindow(QMainWindow):
@@ -1092,6 +1096,15 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.warning(self, "Import RefDes Excel", f"Could not read RefDes Excel: {exc}")
                 return
+            if _is_ambiguous_refdes_status_rows(rows, self.refdes_records, self.blocks):
+                QMessageBox.warning(
+                    self,
+                    "Import RefDes Excel",
+                    "Ambiguous 2-column RefDes Excel: values resemble both activation statuses and component names. "
+                    "Add an explicit RefDes | Status header for status updates, or use Import RefDes Component Changes "
+                    "for component assignments.",
+                )
+                return
             if _looks_like_refdes_status_rows(rows):
                 parsed = self._parse_refdes_status_rows(rows)
                 self._apply_refdes_status_import(*parsed)
@@ -1199,29 +1212,74 @@ class MainWindow(QMainWindow):
         if not rows:
             return {}, {}, False, ["RefDes status file is empty."]
         header_row, header_values = rows[0]
-        if not _is_refdes_status_header(header_values):
-            expected_headers = " or ".join(", ".join(header) for header in REFDES_STATUS_HEADERS)
-            return {}, {}, False, [f"Row {header_row}: expected header: {expected_headers}"]
-        header = tuple(value.strip() for value in header_values[:3])
-        normalized_header_values = tuple(value.strip() for value in header_values)
-        requires_full_inventory = header in (LEGACY_REFDES_STATUS_HEADER, LEGACY_REFDES_STATUS_EXPORT_HEADER[:3])
-        has_net_name_column = normalized_header_values[:4] == LEGACY_REFDES_STATUS_EXPORT_HEADER
-        if len(rows) == 1:
-            return {}, {}, requires_full_inventory, ["RefDes status file has no data rows."]
+        recognized_header = _refdes_status_header_kind(header_values)
+        if recognized_header is None:
+            # A row whose leading cells look like a header is almost certainly a malformed
+            # header, not a headerless data row. Keep the existing actionable error.
+            normalized_first_cells = tuple(_normalize_header_value(value) for value in header_values[:4])
+            header_like_count = max(
+                sum(
+                    index < len(expected_header) and value == _normalize_header_value(expected_header[index])
+                    for index, value in enumerate(normalized_first_cells)
+                )
+                for expected_header in REFDES_STATUS_HEADERS
+            )
+            if header_like_count >= 2:
+                expected_headers = " or ".join(", ".join(header) for header in REFDES_STATUS_HEADERS)
+                return {}, {}, False, [f"Row {header_row}: expected header: {expected_headers}"]
+            trimmed_header_values = list(header_values)
+            while trimmed_header_values and not trimmed_header_values[-1].strip():
+                trimmed_header_values.pop()
+            column_count = len(trimmed_header_values)
+            if column_count not in (2, 3):
+                expected_headers = " or ".join(", ".join(header) for header in REFDES_STATUS_HEADERS)
+                return {}, {}, False, [f"Row {header_row}: expected header: {expected_headers}"]
+            header = None
+            requires_full_inventory = False
+            has_net_name_column = False
+            headerless_columns = column_count
+        else:
+            header = recognized_header
+            requires_full_inventory = header in (
+                LEGACY_REFDES_STATUS_HEADER,
+                LEGACY_REFDES_STATUS_EXPORT_HEADER[:3],
+                LEGACY_REFDES_STATUS_EXPORT_HEADER,
+            )
+            has_net_name_column = header == LEGACY_REFDES_STATUS_EXPORT_HEADER
+            headerless_columns = 0
+            if len(rows) == 1:
+                return {}, {}, requires_full_inventory, ["RefDes status file has no data rows."]
 
         statuses: dict[str, str] = {}
         components: dict[str, str] = {}
         errors: list[str] = []
-        for row_number, values in rows[1:]:
-            component_name = values[0].strip() if len(values) > 0 else ""
-            refdes_name = values[1].strip() if len(values) > 1 else ""
-            activation_status = values[2].strip() if len(values) > 2 else ""
-            extra_values = [value.strip() for value in (values[4:] if has_net_name_column else values[3:]) if value.strip()]
-            if not component_name or not refdes_name or not activation_status:
-                errors.append(f"Row {row_number}: Component, RefDes Name, and Activation Status are required.")
+        data_rows = rows[1:] if header is not None else rows
+        is_two_column = headerless_columns == 2 or header == REFDES_STATUS_HEADER
+        for row_number, values in data_rows:
+            if is_two_column:
+                component_name = ""
+                refdes_name = values[0].strip() if len(values) > 0 else ""
+                activation_status = values[1].strip() if len(values) > 1 else ""
+                extra_values = [value.strip() for value in values[2:] if value.strip()]
+                inferred_component = self.effective_component_for_refdes(refdes_name)
+                if inferred_component is not None:
+                    component_name = inferred_component
+            else:
+                component_name = values[0].strip() if len(values) > 0 else ""
+                refdes_name = values[1].strip() if len(values) > 1 else ""
+                activation_status = values[2].strip() if len(values) > 2 else ""
+                extra_values = [value.strip() for value in (values[4:] if has_net_name_column else values[3:]) if value.strip()]
+            if (is_two_column and (not refdes_name or not activation_status)) or (
+                not is_two_column and (not component_name or not refdes_name or not activation_status)
+            ):
+                if is_two_column:
+                    errors.append(f"Row {row_number}: RefDes and Activation Status are required.")
+                else:
+                    errors.append(f"Row {row_number}: Component, RefDes Name, and Activation Status are required.")
                 continue
             if extra_values:
-                errors.append(f"Row {row_number}: expected exactly 3 columns.")
+                expected_columns = 2 if is_two_column else 3
+                errors.append(f"Row {row_number}: expected exactly {expected_columns} columns.")
                 continue
             if refdes_name in statuses:
                 errors.append(f"Duplicate RefDes: {refdes_name}")
@@ -1306,12 +1364,24 @@ def _read_refdes_component_xlsx(path: Path) -> list[tuple[int, list[str]]]:
 
 
 def _is_refdes_status_header(values: list[str]) -> bool:
-    normalized = tuple(value.strip() for value in values)
-    if normalized[:4] == LEGACY_REFDES_STATUS_EXPORT_HEADER:
-        return not any(value.strip() for value in values[4:])
-    header = normalized[:3]
-    extra_values = [value.strip() for value in values[3:] if value.strip()]
-    return header in (LEGACY_REFDES_STATUS_HEADER, PARTIAL_REFDES_STATUS_HEADER) and not extra_values
+    return _refdes_status_header_kind(values) is not None
+
+
+def _normalize_header_value(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _refdes_status_header_kind(values: list[str]) -> tuple[str, ...] | None:
+    normalized = tuple(_normalize_header_value(value) for value in values)
+    if normalized[:4] == tuple(_normalize_header_value(value) for value in LEGACY_REFDES_STATUS_EXPORT_HEADER):
+        return LEGACY_REFDES_STATUS_EXPORT_HEADER if not any(value.strip() for value in values[4:]) else None
+    if normalized[:3] == tuple(_normalize_header_value(value) for value in LEGACY_REFDES_STATUS_HEADER):
+        return LEGACY_REFDES_STATUS_HEADER if not any(value.strip() for value in values[3:]) else None
+    if normalized[:3] == tuple(_normalize_header_value(value) for value in PARTIAL_REFDES_STATUS_HEADER):
+        return PARTIAL_REFDES_STATUS_HEADER if not any(value.strip() for value in values[3:]) else None
+    if normalized[:2] == tuple(_normalize_header_value(value) for value in REFDES_STATUS_HEADER):
+        return REFDES_STATUS_HEADER if not any(value.strip() for value in values[2:]) else None
+    return None
 
 
 def _looks_like_refdes_status_rows(rows: list[tuple[int, list[str]]]) -> bool:
@@ -1319,8 +1389,47 @@ def _looks_like_refdes_status_rows(rows: list[tuple[int, list[str]]]) -> bool:
         return False
     values = rows[0][1]
     nonempty_values = [value.strip() for value in values if value.strip()]
-    return len(nonempty_values) >= 3 or any(
-        value.strip() in REFDES_STATUS_HEADER_TOKENS for value in values[:3]
+    if _is_refdes_status_header(values):
+        return True
+    if len(nonempty_values) >= 3:
+        return True
+    if len(nonempty_values) != 2:
+        return False
+    # Headerless RefDes/status files are status imports when at least one
+    # second-column value is status-like (case-insensitive). This deliberately
+    # routes mixed valid/invalid status rows to the status parser so they are
+    # rejected atomically instead of being treated as component changes.
+    status_like_values = [
+        row_values[1].strip()
+        for _, row_values in rows
+        if len(row_values) > 1 and row_values[1].strip()
+    ]
+    return any(value.casefold() in IMPORTABLE_ACTIVATION_STATUS_TOKENS for value in status_like_values)
+
+
+def _is_ambiguous_refdes_status_rows(
+    rows: list[tuple[int, list[str]]],
+    refdes_records: list[RefDesRecord],
+    blocks: list[PartialCktBlock],
+) -> bool:
+    if not rows or _is_refdes_status_header(rows[0][1]):
+        return False
+    first_values = rows[0][1]
+    first_trimmed = list(first_values)
+    while first_trimmed and not first_trimmed[-1].strip():
+        first_trimmed.pop()
+    if len(first_trimmed) != 2:
+        return False
+    known_components = {block.component_name.casefold() for block in blocks}
+    known_components.update(record.component_name.casefold() for record in refdes_records)
+    status_like_values = [
+        row_values[1].strip()
+        for _, row_values in rows
+        if len(row_values) > 1 and row_values[1].strip()
+    ]
+    return any(
+        value.casefold() in IMPORTABLE_ACTIVATION_STATUS_TOKENS and value.casefold() in known_components
+        for value in status_like_values
     )
 
 

@@ -462,6 +462,144 @@ def test_main_window_refdes_drop_routes_status_and_component_xlsx(tmp_path: Path
     assert window.refdes_component_changes == {"C285_0": "CAP_0603"}
 
 
+def test_main_window_accepts_casefold_status_headers_and_explicit_two_column_header(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    cases = [
+        (("Component", "RefDes Name", "Activation Status"), 3, True),
+        (("Component type", "REFDES", "Status"), 3, False),
+        (("RefDes", "Status"), 2, False),
+        (("Component", "RefDes Name", "Activation Status", "Net Name"), 4, True),
+    ]
+    for index, (header, column_count, requires_full) in enumerate(cases):
+        window = MainWindow()
+        window.blocks = [_make_block("CAP_0402")]
+        window.refdes_records = [
+            RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+            RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+        ]
+        window.rebuild_refdes_groups()
+        path = tmp_path / f"casefold_{index}.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append([f"  {value.lower()}  " for value in header])
+        if column_count == 4:
+            sheet.append(["CAP_0402", "C100_0", "Disabled", "5V_A"])
+        elif column_count == 3:
+            sheet.append(["CAP_0402", "C100_0", "Disabled"])
+        else:
+            sheet.append(["C100_0", "Disabled"])
+        if column_count == 4:
+            sheet.append(["CAP_0402", "C285_0", "Automatic", "GND"])
+        elif requires_full:
+            sheet.append(["CAP_0402", "C285_0", "Automatic"])
+        workbook.save(path)
+
+        statuses, _, parsed_requires_full, parse_errors = window._parse_refdes_status_file(path)
+        assert statuses and parse_errors == []
+        assert parsed_requires_full is requires_full
+        assert window.validate_refdes_status_file(path) == []
+        window.import_refdes_status_file(path)
+        assert window.effective_activation_status_for_refdes("C100_0") == "Disabled"
+        assert window.refdes_component_changes == {}
+
+
+def test_main_window_refdes_drop_applies_headerless_two_and_three_column_status_files(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402"), _make_block("CAP_0603")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+    window.rebuild_refdes_groups()
+    three_col = tmp_path / "headerless_three.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["CAP_0402", "C100_0", "Disabled"])
+    workbook.save(three_col)
+    two_col = tmp_path / "headerless_two.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C285_0", "Disabled"])
+    workbook.save(two_col)
+
+    window.import_refdes_drop_file(three_col)
+    window.import_refdes_drop_file(two_col)
+
+    assert window.refdes_activation_status_changes == {"C100_0": "Disabled", "C285_0": "Disabled"}
+    assert window.refdes_component_changes == {}
+
+
+def test_main_window_refdes_drop_status_like_two_column_inputs_reject_atomically(tmp_path: Path, monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402"), _make_block("CAP_0603")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+    window.rebuild_refdes_groups()
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, _title, message: warnings.append(message))
+
+    lowercase = tmp_path / "lowercase_status.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C100_0", "disabled"])
+    workbook.save(lowercase)
+    mixed = tmp_path / "mixed_status.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C100_0", "Enabled"])
+    workbook.active.append(["C285_0", "CAP_0603"])
+    workbook.save(mixed)
+
+    window.import_refdes_drop_file(lowercase)
+    window.import_refdes_drop_file(mixed)
+
+    assert len(warnings) == 2
+    assert all("Unknown Activation Status" in message for message in warnings)
+    assert window.refdes_activation_status_changes == {}
+    assert window.refdes_component_changes == {}
+
+    unknown = tmp_path / "unknown_refdes_two.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C999_0", "Enabled"])
+    workbook.save(unknown)
+    assert any("Unexpected RefDes: C999_0" in error for error in window.validate_refdes_status_file(unknown))
+
+    duplicate = tmp_path / "duplicate_refdes_two.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C100_0", "Enabled"])
+    workbook.active.append(["C100_0", "Disabled"])
+    workbook.save(duplicate)
+    assert "Duplicate RefDes: C100_0" in window.validate_refdes_status_file(duplicate)
+
+    extra = tmp_path / "extra_refdes_two.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C100_0", "Enabled"])
+    workbook.active.append(["C285_0", "Disabled", "extra"])
+    workbook.save(extra)
+    assert "Row 2: expected exactly 2 columns." in window.validate_refdes_status_file(extra)
+
+
+def test_main_window_refdes_drop_rejects_two_column_status_component_collision(tmp_path: Path, monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("Enabled")]
+    window.refdes_records = [RefDesRecord(component_name="Enabled", refdes_name="C100_0", activation_status="Automatic")]
+    window.rebuild_refdes_groups()
+    path = tmp_path / "ambiguous_two.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C100_0", "Enabled"])
+    workbook.save(path)
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, _title, message: warnings.append(message))
+
+    window.import_refdes_drop_file(path)
+
+    assert len(warnings) == 1
+    assert "Ambiguous 2-column" in warnings[0]
+    assert window.refdes_activation_status_changes == {}
+    assert window.refdes_component_changes == {}
+
+
 def test_main_window_refdes_drop_rejects_malformed_status_header_once(tmp_path: Path, monkeypatch) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
