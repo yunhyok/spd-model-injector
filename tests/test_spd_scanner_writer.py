@@ -120,6 +120,61 @@ def test_scan_spd_inventory_records_connect_line_locations(tmp_path: Path) -> No
     assert record.connect_line == ".Connect C100_0 CAP_0402 Usage = 0b1000 Checked = 1\n"
 
 
+def test_scan_spd_inventory_reads_primary_net_name_from_connect_node_lines(tmp_path: Path) -> None:
+    spd_path = tmp_path / "board.spd"
+    spd_path.write_text(
+        ".Connect C100_0 CAP_0402 Checked = 1\n"
+        "1 $Package.Node6430!!1::5V_A\n"
+        "2 $Package.Node13541!!2::GND\n"
+        ".EndC\n"
+        ".Connect C101_0 CAP_0402 Checked = 1\n"
+        "1 $Package.Node7!!1\n"
+        ".EndC\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    inventory = scan_spd_inventory(spd_path)
+
+    assert [(record.refdes_name, record.net_name) for record in inventory.refdes_records] == [
+        ("C100_0", "5V_A"),
+        ("C101_0", ""),
+    ]
+
+
+def test_scan_spd_inventory_uses_first_net_bearing_pin_after_unannotated_pin(tmp_path: Path) -> None:
+    spd_path = tmp_path / "late-net.spd"
+    spd_path.write_text(
+        ".Connect U1 DUT Checked = 1\n"
+        "A1 $Package.Node1!!A1\n"
+        "A2 $Package.Node2!!A2::VDD\n"
+        "A3 $Package.Node3!!A3::GND\n"
+        ".EndC\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    inventory = scan_spd_inventory(spd_path)
+
+    assert inventory.refdes_records[0].net_name == "VDD"
+
+
+def test_scan_spd_inventory_reads_primary_net_name_from_alphanumeric_pin(tmp_path: Path) -> None:
+    spd_path = tmp_path / "lga.spd"
+    spd_path.write_text(
+        ".Connect LGA LGA-ALL Usage = 0b1000 Checked = 1\n"
+        "A10 $Package.Node20666!!A10::DGND\n"
+        "AA1 $Package.Node20667!!AA1::VDD\n"
+        ".EndC\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    inventory = scan_spd_inventory(spd_path)
+
+    assert inventory.refdes_records[0].net_name == "DGND"
+
+
 def test_write_spd_replaces_only_changed_partialckt_bodies_and_keeps_lf(tmp_path: Path) -> None:
     spd_path = tmp_path / "board.spd"
     output_path = tmp_path / "board_out.spd"

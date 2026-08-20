@@ -12,7 +12,7 @@ def export_refdes_xlsx(path: str | Path, records: Sequence[RefDesRecord]) -> Non
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "RefDes"
-    sheet.append(["Component", "RefDes Name", "Activation Status"])
+    sheet.append(["Component", "RefDes Name", "Activation Status", "Net Name"])
     for record in records:
-        sheet.append([record.component_name, record.refdes_name, record.activation_status])
+        sheet.append([record.component_name, record.refdes_name, record.activation_status, record.net_name])
     workbook.save(Path(path))

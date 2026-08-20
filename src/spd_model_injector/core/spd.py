@@ -11,6 +11,11 @@ _PARTIAL_RE = re.compile(r"^\.PartialCkt\s+(.+?)\s+ExtNode\s*=\s*(.*)$", re.IGNO
 _PARTIAL_START_RE = re.compile(r"^\.PartialCkt(?:\s|$)", re.IGNORECASE)
 _END_PARTIAL_RE = re.compile(r"^\.EndPartialCkt(?:\s|$)", re.IGNORECASE)
 _CONNECT_RE = re.compile(r"^\.Connect\s+(\S+)\s+(\S+)(?:\s+(.*))?$", re.IGNORECASE)
+_END_CONNECT_RE = re.compile(r"^\.EndC(?:\s|$)", re.IGNORECASE)
+# Connection entries use numeric pins for discrete parts and alphanumeric pins
+# (for example ``A10`` or ``LGA_A10``) for DUT/LGA packages.  Requiring the
+# package-node token avoids mistaking ``Usage = ...`` or ``.EndC`` for a pin.
+_CONNECT_NODE_RE = re.compile(r"^\s*[A-Za-z0-9_./+-]+\s+\$Package\.Node\S*(?:\s|$)", re.IGNORECASE)
 _USAGE_RE = re.compile(r"\bUsage\s*=\s*(\S+)", re.IGNORECASE)
 _USAGE_ASSIGNMENT_RE = re.compile(r"\s+Usage\s*=\s*\S+", re.IGNORECASE)
 
@@ -43,6 +48,7 @@ class RefDesRecord:
     connect_line_start_offset: int | None = None
     connect_line_end_offset: int | None = None
     connect_line: str | None = None
+    net_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,8 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
     _report_progress(progress_callback, "Opening SPD file", 0, file_size)
 
     with spd_path.open("rb", buffering=_CHUNK_SIZE) as handle:
+        active_connect: RefDesRecord | None = None
+        active_connect_net_seen = False
         while True:
             line_start = handle.tell()
             raw_line = handle.readline()
@@ -79,6 +87,26 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
                 break
             line_no += 1
             line_text = _decode_line(raw_line)
+
+            if active_connect is not None:
+                if _END_CONNECT_RE.match(_strip_newline(line_text)):
+                    refdes_records.append(active_connect)
+                    active_connect = None
+                    active_connect_net_seen = False
+                    continue
+                # Use the first node entry that actually carries a ``::Net``;
+                # some DUT/LGA blocks have unannotated pins before the net-bearing entry.
+                if not active_connect_net_seen and _CONNECT_NODE_RE.match(line_text) and "::" in line_text:
+                    net_name = line_text.split("::", 1)[1].strip()
+                    if net_name:
+                        active_connect = _replace_record_net_name(active_connect, net_name)
+                        active_connect_net_seen = True
+                # A malformed block may omit .EndC; preserve the old scanner's
+                # behavior by allowing a new .Connect to terminate the prior one.
+                if _CONNECT_RE.match(_strip_newline(line_text)):
+                    refdes_records.append(active_connect)
+                    active_connect = None
+                    active_connect_net_seen = False
 
             if _PARTIAL_START_RE.match(line_text):
                 block_start_offset = line_start
@@ -147,7 +175,11 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
 
             record = _parse_connect_line(line_text, start_offset=line_start, end_offset=line_start + len(raw_line))
             if record is not None:
-                refdes_records.append(record)
+                active_connect = record
+                active_connect_net_seen = False
+
+        if active_connect is not None:
+            refdes_records.append(active_connect)
 
     _report_progress(
         progress_callback,
@@ -292,6 +324,18 @@ def _parse_connect_line(
         connect_line_start_offset=start_offset,
         connect_line_end_offset=end_offset,
         connect_line=line,
+    )
+
+
+def _replace_record_net_name(record: RefDesRecord, net_name: str) -> RefDesRecord:
+    return RefDesRecord(
+        component_name=record.component_name,
+        refdes_name=record.refdes_name,
+        activation_status=record.activation_status,
+        net_name=net_name,
+        connect_line_start_offset=record.connect_line_start_offset,
+        connect_line_end_offset=record.connect_line_end_offset,
+        connect_line=record.connect_line,
     )
 
 

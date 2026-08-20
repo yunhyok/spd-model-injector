@@ -6,8 +6,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QPlainTextEdit, QSplitter
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QMessageBox, QPlainTextEdit, QSplitter
 
+from spd_model_injector import __version__
 from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, SpdInventory
 from spd_model_injector.ui.main_window import MainWindow
 from spd_model_injector.ui.workers import ExportWorker
@@ -44,7 +45,7 @@ def test_main_window_has_expected_title_and_empty_initial_state() -> None:
     window = MainWindow()
 
     assert app is not None
-    assert window.windowTitle() == "SPD Model Injector 0.1.6"
+    assert window.windowTitle() == f"SPD Model Injector {__version__}"
     assert window.component_list.count() == 0
     assert "Load an SPD file" in window.status_label.text()
     assert window.undo_component_change_action is not None
@@ -219,12 +220,12 @@ def test_main_window_refdes_excel_export_uses_changed_components(tmp_path: Path)
     workbook.close()
 
     assert rows == [
-        ("Component", "RefDes Name", "Activation Status"),
-        ("CAP_0603", "C100_0", "Automatic"),
+        ("Component", "RefDes Name", "Activation Status", "Net Name"),
+        ("CAP_0603", "C100_0", "Automatic", None),
     ]
 
 
-def test_main_window_imports_refdes_status_excel_after_name_and_count_validation(tmp_path: Path) -> None:
+def test_main_window_imports_refdes_status_excel_with_legacy_header(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
     window.blocks = [_make_block("CAP_0402"), _make_block("RES_0402")]
@@ -262,7 +263,23 @@ def test_main_window_imports_refdes_status_excel_after_name_and_count_validation
     assert "Imported 3 RefDes activation status" in window.status_log.toPlainText()
 
 
-def test_main_window_rejects_refdes_status_excel_with_different_names_or_count(tmp_path: Path) -> None:
+def test_main_window_imports_four_column_refdes_export(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic", net_name="5V_A"),
+    ]
+    status_path = tmp_path / "status_export.xlsx"
+    window.export_refdes_excel(status_path)
+
+    window.import_refdes_status_file(status_path)
+
+    assert window.refdes_activation_status_changes == {}
+    assert window.validate_refdes_status_file(status_path) == []
+
+
+def test_main_window_accepts_partial_refdes_status_excel_and_rejects_unexpected_names(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
     window.blocks = [_make_block("CAP_0402")]
@@ -278,17 +295,171 @@ def test_main_window_rejects_refdes_status_excel_with_different_names_or_count(t
     sheet.append(["CAP_0402", "C100_0", "Disabled"])
     sheet.append(["CAP_0402", "C999_0", "Enabled"])
     workbook.save(mismatch_path)
-    count_path = tmp_path / "status_count.xlsx"
+    partial_path = tmp_path / "status_partial.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component type", "REFDES", "Status"])
+    sheet.append(["CAP_0402", "C100_0", "Disabled"])
+    workbook.save(partial_path)
+    legacy_partial_path = tmp_path / "status_legacy_partial.xlsx"
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["Component", "RefDes Name", "Activation Status"])
     sheet.append(["CAP_0402", "C100_0", "Disabled"])
-    workbook.save(count_path)
+    workbook.save(legacy_partial_path)
 
-    assert "Missing RefDes: C285_0" in window.validate_refdes_status_file(mismatch_path)
     assert "Unexpected RefDes: C999_0" in window.validate_refdes_status_file(mismatch_path)
-    assert "RefDes count mismatch: expected 2, got 1" in window.validate_refdes_status_file(count_path)
+    assert window.validate_refdes_status_file(partial_path) == []
+    assert "Missing RefDes: C285_0" in window.validate_refdes_status_file(legacy_partial_path)
+    assert "RefDes count mismatch: expected 2, got 1" in window.validate_refdes_status_file(legacy_partial_path)
+
+    window.import_refdes_status_file(partial_path)
+
+    assert window.refdes_activation_status_changes == {"C100_0": "Disabled"}
+    assert window.effective_activation_status_for_refdes("C285_0") == "Enabled"
+
+
+def test_main_window_imports_c01_style_refdes_status_excel_as_partial_update(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402_100NF")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402_100NF", refdes_name="C1077_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402_100NF", refdes_name="C164_0", activation_status="Disabled"),
+        RefDesRecord(component_name="CAP_0402_100NF", refdes_name="C1149_0", activation_status="Enabled"),
+        RefDesRecord(component_name="CAP_0402_100NF", refdes_name="C1094_0", activation_status="Automatic"),
+    ]
+    window.rebuild_refdes_groups()
+    status_path = tmp_path / "c01_style.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component type", "REFDES", "Status"])
+    sheet.append(["CAP_0402_100NF", "C1077_0", "Enabled"])
+    sheet.append(["CAP_0402_100NF", "C164_0", "Automatic"])
+    sheet.append(["CAP_0402_100NF", "C1149_0", "Disabled"])
+    workbook.save(status_path)
+
+    window.import_refdes_status_file(status_path)
+
+    assert window.refdes_activation_status_changes == {
+        "C1077_0": "Enabled",
+        "C164_0": "Automatic",
+        "C1149_0": "Disabled",
+    }
+    assert window.effective_activation_status_for_refdes("C1094_0") == "Automatic"
+
+
+def test_main_window_refdes_status_import_keeps_strict_row_validation(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+
+    def write_status_file(name: str, rows: list[list[str]]) -> Path:
+        path = tmp_path / name
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Component type", "REFDES", "Status"])
+        for row in rows:
+            sheet.append(row)
+        workbook.save(path)
+        return path
+
+    duplicate_path = write_status_file(
+        "status_duplicate.xlsx",
+        [["CAP_0402", "C100_0", "Enabled"], ["CAP_0402", "C100_0", "Disabled"]],
+    )
+    blank_path = write_status_file("status_blank.xlsx", [["CAP_0402", "", "Disabled"]])
+    extra_path = write_status_file("status_extra.xlsx", [["CAP_0402", "C100_0", "Disabled", "extra"]])
+    wrong_case_path = write_status_file("status_wrong_case.xlsx", [["CAP_0402", "C100_0", "disabled"]])
+    header_only_path = write_status_file("status_header_only.xlsx", [])
+
+    assert "Duplicate RefDes: C100_0" in window.validate_refdes_status_file(duplicate_path)
+    assert "Row 2: Component, RefDes Name, and Activation Status are required." in window.validate_refdes_status_file(blank_path)
+    assert "Row 2: expected exactly 3 columns." in window.validate_refdes_status_file(extra_path)
+    assert "Unknown Activation Status: disabled" in window.validate_refdes_status_file(wrong_case_path)
+    assert window.validate_refdes_status_file(header_only_path) == ["RefDes status file has no data rows."]
     assert window.refdes_activation_status_changes == {}
+
+
+def test_main_window_refdes_status_import_rejects_component_mismatch_atomically(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+    window.refdes_activation_status_changes = {"C285_0": "Disabled"}
+    status_path = tmp_path / "status_component_mismatch.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component type", "REFDES", "Status"])
+    sheet.append(["CAP_0402", "C100_0", "Disabled"])
+    sheet.append(["WRONG_COMPONENT", "C285_0", "Automatic"])
+    workbook.save(status_path)
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, _title, message: warnings.append(message))
+
+    window.import_refdes_status_file(status_path)
+
+    assert window.refdes_activation_status_changes == {"C285_0": "Disabled"}
+    assert warnings == ["Component mismatch for C285_0: expected CAP_0402, got WRONG_COMPONENT"]
+
+
+def test_main_window_refdes_drop_routes_status_and_component_xlsx(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.blocks = [_make_block("CAP_0402"), _make_block("CAP_0603")]
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic"),
+        RefDesRecord(component_name="CAP_0402", refdes_name="C285_0", activation_status="Enabled"),
+    ]
+    window.rebuild_refdes_groups()
+
+    status_path = tmp_path / "status_drop.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component type", "REFDES", "Status"])
+    sheet.append(["CAP_0402", "C100_0", "Disabled"])
+    workbook.save(status_path)
+    component_path = tmp_path / "component_drop.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["C285_0", "CAP_0603"])
+    workbook.save(component_path)
+
+    window.import_refdes_drop_file(status_path)
+    window.import_refdes_drop_file(component_path)
+
+    assert window.refdes_activation_status_changes == {"C100_0": "Disabled"}
+    assert window.refdes_component_changes == {"C285_0": "CAP_0603"}
+
+
+def test_main_window_refdes_drop_rejects_malformed_status_header_once(tmp_path: Path, monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.refdes_records = [
+        RefDesRecord(component_name="CAP_0402", refdes_name="C100_0", activation_status="Automatic")
+    ]
+    status_path = tmp_path / "status_bad_header.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Component type", "REFDES", "State"])
+    sheet.append(["CAP_0402", "C100_0", "Disabled"])
+    workbook.save(status_path)
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda _parent, _title, message: warnings.append(message))
+
+    window.import_refdes_drop_file(status_path)
+
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Row 1: expected header:")
+    assert window.refdes_activation_status_changes == {}
+    assert window.refdes_component_changes == {}
 
 
 def test_main_window_refdes_status_import_round_trips_unknown_only_for_unknown_records(tmp_path: Path) -> None:
