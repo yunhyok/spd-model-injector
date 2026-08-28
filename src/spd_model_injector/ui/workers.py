@@ -37,6 +37,8 @@ class ExportWorker(QObject):
         refdes_component_changes: dict[str, str] | None = None,
         refdes_activation_status_changes: dict[str, str] | None = None,
         refdes_records: list[RefDesRecord] | None = None,
+        component_renames: dict[str, str] | None = None,
+        component_clones: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.source_path = Path(source_path)
@@ -46,6 +48,8 @@ class ExportWorker(QObject):
         self.refdes_component_changes = refdes_component_changes or {}
         self.refdes_activation_status_changes = refdes_activation_status_changes or {}
         self.refdes_records = refdes_records
+        self.component_renames = component_renames or {}
+        self.component_clones = component_clones or {}
 
     @Slot()
     def run(self) -> None:
@@ -58,6 +62,8 @@ class ExportWorker(QObject):
                 refdes_component_changes=self.refdes_component_changes,
                 refdes_activation_status_changes=self.refdes_activation_status_changes,
                 refdes_records=self.refdes_records,
+                component_renames=self.component_renames,
+                component_clones=self.component_clones,
             )
             self.finished.emit(str(self.output_path))
         except Exception as exc:  # pragma: no cover - surfaced to UI

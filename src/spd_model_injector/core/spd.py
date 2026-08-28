@@ -34,6 +34,8 @@ class PartialCktBlock:
     body_end_offset: int
     block_end_offset: int
     header_lines: list[str]
+    source_component_name: str | None = None
+    clone_source_name: str | None = None
 
     @property
     def port_count(self) -> int:
@@ -206,23 +208,99 @@ def write_spd_with_replacements(
     refdes_component_changes: Mapping[str, str] | None = None,
     refdes_activation_status_changes: Mapping[str, str] | None = None,
     refdes_records: Sequence[RefDesRecord] | None = None,
+    component_renames: Mapping[str, str] | None = None,
+    component_clones: Mapping[str, str] | None = None,
 ) -> None:
-    """Write a new SPD, replacing selected bodies and RefDes component links."""
+    """Write a new SPD, replacing selected bodies and component identities."""
     source = Path(source_path)
     output = Path(output_path)
     _ensure_output_is_not_source(source, output)
     replacement_by_offset: dict[int, tuple[str, int]] = {
         block.body_start_offset: (_normalize_model_text(replacements[block.component_name]), block.body_end_offset)
         for block in blocks
-        if block.component_name in replacements
+        if block.component_name in replacements and block.clone_source_name is None
     }
 
-    if refdes_component_changes or refdes_activation_status_changes:
+    renames = dict(component_renames or {})
+    clones = dict(component_clones or {})
+    by_name = {block.component_name: block for block in blocks}
+    by_name.update({block.source_component_name: block for block in blocks if block.source_component_name})
+    identity_names = (*renames, *renames.values(), *clones, *clones.values())
+    if any(not name or any(char.isspace() for char in name) for name in identity_names):
+        raise ValueError("Component names must be non-empty single tokens.")
+    effective_names = {block.component_name for block in blocks}
+    known_names = {block.component_name for block in blocks}
+    known_names.update(block.source_component_name for block in blocks if block.source_component_name)
+    if any(source not in known_names for source in renames):
+        raise ValueError("Unknown component rename source.")
+    rename_targets = set(renames.values())
+    renamed_current_names = {
+        block.component_name
+        for block in blocks
+        if (block.source_component_name or block.component_name) in renames
+    }
+    collision = any(target in effective_names - renamed_current_names for target in rename_targets)
+    if len(rename_targets) != len(renames) or collision:
+        raise ValueError("Component rename collision.")
+    if rename_targets & set(clones):
+        raise ValueError("Component clone/rename collision.")
+    part_entries = _find_part_entries(source_path, set(clones.values()) | set(renames))
+    for new_name, source_name in clones.items():
+        source_block = by_name.get(source_name)
+        if source_block is None:
+            raise ValueError(f"Unknown clone source: {source_name}")
+        if new_name in known_names:
+            # The UI may include the synthetic clone block in ``blocks``.
+            if not any(block.component_name == new_name and block.clone_source_name == source_name for block in blocks):
+                raise ValueError(f"Component already exists: {new_name}")
+        part = part_entries.get(source_name)
+        if part is None:
+            raise ValueError(f"Clone source lacks a .Part definition: {source_name}")
+        _, part_end, part_lines = part
+        insertion = _rename_part_lines(part_lines, new_name)
+        prior = replacement_by_offset.get(part_end)
+        replacement_by_offset[part_end] = ((prior[0] if prior and prior[1] == part_end else "") + insertion, part_end)
+        body = replacements.get(new_name)
+        if body is None:
+            body = replacements.get(source_block.component_name)
+        if body is None:
+            body = read_block_body(source_path, source_block)
+        header = _rename_partial_header(source_block.header_lines, new_name)
+        clone_text = "\n".join(header) + "\n" + _normalize_model_text(body) + ".EndPartialCkt\n"
+        offset = source_block.block_end_offset
+        prior = replacement_by_offset.get(offset)
+        replacement_by_offset[offset] = ((prior[0] if prior and prior[1] == offset else "") + clone_text, offset)
+
+    # Rename the header range for each identity-bearing PartialCkt block.
+    for block in blocks:
+        old_name = block.source_component_name or block.component_name
+        new_name = renames.get(old_name)
+        if new_name and old_name != new_name:
+            header_text = "\n".join(_rename_partial_header(block.header_lines, new_name)) + "\n"
+            prior = replacement_by_offset.get(block.block_start_offset)
+            replacement_by_offset[block.block_start_offset] = (
+                (prior[0] if prior and prior[1] == block.block_start_offset else "") + header_text,
+                block.body_start_offset,
+            )
+
+    # Part definitions (including + continuation lines) are edited in-place.
+    for old_name, new_name in renames.items():
+        part = part_entries.get(old_name)
+        if part is None:
+            continue
+        start, end, lines = part
+        renamed_part = _rename_part_lines(lines, new_name)
+        prior = replacement_by_offset.get(start)
+        if prior is not None and prior[1] != start:
+            raise ValueError("Overlapping component definition edits.")
+        replacement_by_offset[start] = ((prior[0] if prior else "") + renamed_part, end)
+
+    if refdes_component_changes or refdes_activation_status_changes or renames:
         component_changes = refdes_component_changes or {}
         status_changes = refdes_activation_status_changes or {}
         records = refdes_records if refdes_records is not None else scan_spd_inventory(source).refdes_records
         for record in records:
-            new_component = component_changes.get(record.refdes_name)
+            new_component = component_changes.get(record.refdes_name) or renames.get(record.component_name)
             new_status = status_changes.get(record.refdes_name)
             if new_component is None and new_status is None:
                 continue
@@ -295,6 +373,62 @@ def _parse_component_name(first_header_line: str) -> str:
     if not match:
         return first_header_line.split(maxsplit=1)[1].strip() if " " in first_header_line else first_header_line
     return match.group(1).strip()
+
+
+_PART_RE = re.compile(r"^\.Part\s+(\S+)(.*)$", re.IGNORECASE)
+
+
+def _rename_partial_header(header_lines: Sequence[str], name: str) -> list[str]:
+    first = header_lines[0]
+    match = _PARTIAL_RE.match(first)
+    if match:
+        first = f".PartialCkt {name} ExtNode = {match.group(2)}"
+    else:
+        parts = first.split(maxsplit=1)
+        first = f"{parts[0]} {name}" if len(parts) > 1 else f"{parts[0]} {name}"
+    return [first, *header_lines[1:]]
+
+
+def _rename_part_lines(lines: Sequence[str], name: str) -> str:
+    match = _PART_RE.match(lines[0])
+    if not match:
+        raise ValueError(f"Invalid .Part line: {lines[0]}")
+    return "\n".join([f".Part {name}{match.group(2)}", *lines[1:]]) + "\n"
+
+
+def _find_part_entries(path: str | Path, names: set[str]) -> dict[str, tuple[int, int, list[str]]]:
+    """Collect requested .Part entries in one streaming pass."""
+    found: dict[str, tuple[int, int, list[str]]] = {}
+    if not names:
+        return found
+    with Path(path).open("rb") as handle:
+        while True:
+            start = handle.tell()
+            raw = handle.readline()
+            if not raw:
+                break
+            line = _strip_newline(_decode_line(raw))
+            match = _PART_RE.match(line)
+            if not match or match.group(1) not in names:
+                continue
+            part_name = match.group(1)
+            lines = [line]
+            end = handle.tell()
+            while True:
+                cont_start = handle.tell()
+                cont_raw = handle.readline()
+                if not cont_raw:
+                    end = handle.tell()
+                    break
+                cont = _strip_newline(_decode_line(cont_raw))
+                if not cont.lstrip().startswith("+"):
+                    end = cont_start
+                    handle.seek(cont_start)
+                    break
+                lines.append(cont)
+                end = handle.tell()
+            found[part_name] = (start, end, lines)
+    return found
 
 
 def _parse_ext_nodes(header_lines: Sequence[str]) -> list[str]:

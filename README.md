@@ -17,6 +17,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Preserve vendor comment lines before `.SUBCKT`.
 - Remove `.SUBCKT` and `.ENDS` wrapper lines before injection.
 - Replace the existing PartialCkt body and export to a new SPD path.
+- Right-click a PartialCkt component to clone it (without cloning RefDes instances) or rename it; exports preserve `.Part` continuation lines and update `.Connect` references.
 - Write output as UTF-8 with LF line endings.
 
 ## Port Mapping Rule

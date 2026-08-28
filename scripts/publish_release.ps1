@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.10",
+    [string]$Version = "0.1.11",
     [string]$Repo = "spd-model-injector"
 )
 
@@ -25,4 +25,4 @@ if (-not (Test-Path $installer)) {
     throw "Installer artifact not found: $installer. Run scripts/build.ps1 first."
 }
 
-gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Unified RefDes Excel/CSV import: optional case-insensitive alias headers, component reassignment, and 2-, 3-, or 4-column status updates (Net is ignored). Menu and drag-and-drop use the same auto-detection with safe ambiguity rejection."
+gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Added PartialCkt component clone and rename workflow with isolated clone editing, continuation-line preservation, and coherent RefDes updates."

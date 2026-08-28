@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHeaderView,
+    QInputDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -177,6 +178,8 @@ class MainWindow(QMainWindow):
         self.refdes_activation_status_changes: dict[str, str] = {}
         self.refdes_component_undo_stack: list[RefDesComponentChangeBatch] = []
         self.replacements: dict[str, str] = {}
+        self.component_renames: dict[str, str] = {}
+        self.component_clones: dict[str, str] = {}
         self._loading_editor = False
         self._busy = False
         self._scan_thread: QThread | None = None
@@ -195,6 +198,8 @@ class MainWindow(QMainWindow):
 
         self.component_list = QListWidget()
         self.component_list.currentRowChanged.connect(self._on_current_row_changed)
+        self.component_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.component_list.customContextMenuRequested.connect(self._show_component_context_menu)
 
         self.component_label = QLabel("No component selected")
         self.mapping_label = QLabel("Load an SPD file to inspect PartialCkt blocks.")
@@ -417,6 +422,8 @@ class MainWindow(QMainWindow):
         self.refdes_activation_status_changes.clear()
         self.refdes_component_undo_stack.clear()
         self.replacements.clear()
+        self.component_renames.clear()
+        self.component_clones.clear()
         self.component_list.clear()
         if self.component_filter.text():
             self.component_filter.blockSignals(True)
@@ -476,6 +483,8 @@ class MainWindow(QMainWindow):
         self.refdes_component_undo_stack.clear()
         self.rebuild_refdes_groups()
         self.replacements.clear()
+        self.component_renames.clear()
+        self.component_clones.clear()
         self.populate_components()
         self._update_undo_component_change_action()
         if self.export_refdes_action is not None:
@@ -505,6 +514,8 @@ class MainWindow(QMainWindow):
         self.refdes_activation_status_changes.clear()
         self.refdes_component_undo_stack.clear()
         self.replacements.clear()
+        self.component_renames.clear()
+        self.component_clones.clear()
         self.component_list.clear()
         self._update_component_header()
         self._update_undo_component_change_action()
@@ -616,7 +627,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes:
+        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones:
             confirm = QMessageBox.question(
                 self,
                 "Export",
@@ -702,6 +713,8 @@ class MainWindow(QMainWindow):
             dict(self.refdes_component_changes),
             dict(self.refdes_activation_status_changes),
             list(self.refdes_records),
+            dict(self.component_renames),
+            dict(self.component_clones),
         )
         self._export_worker.moveToThread(self._export_thread)
         self._export_thread.started.connect(self._export_worker.run)
@@ -855,6 +868,99 @@ class MainWindow(QMainWindow):
             self.change_selected_refdes_components(refdes_names)
         elif selected_action in status_actions:
             self.apply_refdes_activation_status_changes(refdes_names, status_actions[selected_action])
+
+    def _show_component_context_menu(self, position) -> None:
+        if self._busy:
+            return
+        row = self.component_list.indexAt(position).row()
+        if row < 0 or row >= len(self.blocks):
+            return
+        self.component_list.setCurrentRow(row)
+        menu = QMenu(self.component_list)
+        clone_action = menu.addAction("Clone Component...")
+        rename_action = menu.addAction("Rename Component...")
+        selected = menu.exec(self.component_list.viewport().mapToGlobal(position))
+        if selected is clone_action:
+            self.clone_current_component()
+        elif selected is rename_action:
+            self.rename_current_component()
+
+    def _prompt_component_name(self, title: str, current: str = "") -> str | None:
+        existing = {block.component_name.casefold() for block in self.blocks}
+        while True:
+            name, accepted = QInputDialog.getText(self, title, "Component Name", text=current)
+            if not accepted:
+                return None
+            name = name.strip()
+            if not name or any(char.isspace() for char in name):
+                QMessageBox.warning(self, title, "Component name must be a non-empty single token.")
+                continue
+            if name.casefold() in existing and name.casefold() != current.casefold():
+                QMessageBox.warning(self, title, f"Component already exists: {name}")
+                continue
+            return name
+
+    def clone_current_component(self) -> None:
+        if self._busy:
+            return
+        source = self.current_block()
+        if source is None:
+            return
+        name = self._prompt_component_name("Clone Component")
+        if not name:
+            return
+        source_name = source.component_name
+        source_origin = source.source_component_name or source.clone_source_name or source_name
+        clone = replace(source, component_name=name, clone_source_name=source_origin)
+        self.blocks.append(clone)
+        self.component_clones[name] = source_origin
+        if source_name in self.replacements:
+            self.replacements[name] = self.replacements[source_name]
+        elif self.spd_path is not None:
+            self.replacements[name] = read_block_body(self.spd_path, source)
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, name)
+        self.component_list.addItem(item)
+        self._style_item(item, clone)
+        self._update_component_header()
+        self.component_list.setCurrentRow(self.component_list.count() - 1)
+        self._append_status(f"Cloned {source_name} as {name}.")
+
+    def rename_current_component(self) -> None:
+        if self._busy:
+            return
+        block = self.current_block()
+        if block is None:
+            return
+        row = self.component_list.currentRow()
+        old_name = block.component_name
+        name = self._prompt_component_name("Rename Component", old_name)
+        if not name or name == old_name:
+            return
+        source_name = block.source_component_name
+        if old_name in self.component_clones:
+            self.component_clones[name] = self.component_clones.pop(old_name)
+        else:
+            origin = source_name or old_name
+            if name == origin:
+                self.component_renames.pop(origin, None)
+            else:
+                self.component_renames[origin] = name
+        header_origin = source_name if block.clone_source_name is not None else (source_name or old_name)
+        self.blocks[row] = replace(block, component_name=name, source_component_name=header_origin)
+        if old_name in self.replacements:
+            self.replacements[name] = self.replacements.pop(old_name)
+        # Keep assignments coherent and invalidate undo batches containing the old identity.
+        for record in self.refdes_records:
+            if self.effective_component_for_refdes(record.refdes_name) == old_name:
+                self._set_refdes_effective_component(record.refdes_name, name)
+        self.refdes_component_undo_stack.clear()
+        self.populate_components()
+        self.component_list.setCurrentRow(row)
+        self.rebuild_refdes_groups()
+        self._populate_refdes_table(name)
+        self._update_undo_component_change_action()
+        self._append_status(f"Renamed {old_name} to {name}.")
 
     def change_selected_refdes_components(self, refdes_names: list[str] | None = None) -> None:
         names = refdes_names or self.selected_refdes_names()
@@ -1356,8 +1462,10 @@ class MainWindow(QMainWindow):
 
     def _item_text(self, block: PartialCktBlock) -> str:
         modified = block.component_name in self.replacements
-        marker = "* " if modified else ""
-        state = "modified" if modified else "existing"
+        renamed = bool(block.source_component_name and block.source_component_name != block.component_name)
+        cloned = block.clone_source_name is not None
+        marker = "* " if modified or renamed or cloned else ""
+        state = "cloned" if cloned else ("renamed" if renamed else ("modified" if modified else "existing"))
         return f"{marker}{block.component_name}\nports: {block.port_count}  {state}"
 
     def _append_status(self, message: str) -> None:
