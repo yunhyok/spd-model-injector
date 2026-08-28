@@ -8,12 +8,16 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 - Load large text-format PowerSI `.spd` files.
 - List `.PartialCkt` components with detected `ExtNode` port counts.
+- Show RefDes records for the selected component from `.Connect` lines.
+- Display RefDes activation status as `Automatic`, `Enabled`, `Disabled`, or `Unknown`.
+- Export all RefDes records to an Excel `.xlsx` file with component, RefDes name, and activation status.
 - Paste or drag-and-drop `.mod` / `.txt` SPICE model text.
 - Parse `.SUBCKT` headers, including `+` continuation lines.
 - Map model ports to the selected PartialCkt `ExtNode` order.
 - Preserve vendor comment lines before `.SUBCKT`.
 - Remove `.SUBCKT` and `.ENDS` wrapper lines before injection.
 - Replace the existing PartialCkt body and export to a new SPD path.
+- Right-click a PartialCkt component to clone it (without cloning RefDes instances) or rename it; exports preserve `.Part` continuation lines and update `.Connect` references.
 - Write output as UTF-8 with LF line endings.
 
 ## Port Mapping Rule
@@ -43,6 +47,7 @@ Requirements:
 
 - Python 3.12
 - PySide6
+- openpyxl
 - pytest
 - PyInstaller
 

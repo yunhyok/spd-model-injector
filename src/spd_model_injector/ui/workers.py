@@ -4,11 +4,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from spd_model_injector.core.spd import PartialCktBlock, scan_spd, write_spd_with_replacements
+from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, scan_spd_inventory, write_spd_with_replacements
 
 
 class ScanWorker(QObject):
-    finished = Signal(list)
+    progress = Signal(str, int, int)
+    finished = Signal(object)
     failed = Signal(str)
 
     def __init__(self, path: str | Path) -> None:
@@ -18,7 +19,7 @@ class ScanWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            self.finished.emit(scan_spd(self.path))
+            self.finished.emit(scan_spd_inventory(self.path, progress_callback=self.progress.emit))
         except Exception as exc:  # pragma: no cover - surfaced to UI
             self.failed.emit(str(exc))
 
@@ -33,17 +34,37 @@ class ExportWorker(QObject):
         output_path: str | Path,
         blocks: list[PartialCktBlock],
         replacements: dict[str, str],
+        refdes_component_changes: dict[str, str] | None = None,
+        refdes_activation_status_changes: dict[str, str] | None = None,
+        refdes_records: list[RefDesRecord] | None = None,
+        component_renames: dict[str, str] | None = None,
+        component_clones: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.source_path = Path(source_path)
         self.output_path = Path(output_path)
         self.blocks = blocks
         self.replacements = replacements
+        self.refdes_component_changes = refdes_component_changes or {}
+        self.refdes_activation_status_changes = refdes_activation_status_changes or {}
+        self.refdes_records = refdes_records
+        self.component_renames = component_renames or {}
+        self.component_clones = component_clones or {}
 
     @Slot()
     def run(self) -> None:
         try:
-            write_spd_with_replacements(self.source_path, self.output_path, self.blocks, self.replacements)
+            write_spd_with_replacements(
+                self.source_path,
+                self.output_path,
+                self.blocks,
+                self.replacements,
+                refdes_component_changes=self.refdes_component_changes,
+                refdes_activation_status_changes=self.refdes_activation_status_changes,
+                refdes_records=self.refdes_records,
+                component_renames=self.component_renames,
+                component_clones=self.component_clones,
+            )
             self.finished.emit(str(self.output_path))
         except Exception as exc:  # pragma: no cover - surfaced to UI
             self.failed.emit(str(exc))
