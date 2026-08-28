@@ -1,0 +1,36 @@
+{
+  "ownershipMarker": "Owned by Markdown HTML Companion v0.1.0",
+  "schemaVersion": 1,
+  "generator": {
+    "name": "Markdown HTML Companion",
+    "version": "0.1.0"
+  },
+  "generatedAt": "2026-08-11T02:13:59.527223+00:00",
+  "repository": "yunhyok/spd-model-injector",
+  "baseBranch": "main",
+  "baseSha": "be98f181884f8592eacc467a9009ac4eccdad898",
+  "branch": "codex/add-html-companions-20260811",
+  "sourceMarkdownCount": 1,
+  "generatedHtmlCount": 1,
+  "documents": [
+    {
+      "source": "README.md",
+      "sourceBlobSha": "d0507a6a28145b309457131e145815330d0ca589",
+      "sourceSha256": "31e7491ecd981bb7730b103345a9f216ea82c39f7bf6343095b25683550dcbad",
+      "output": "README.companion.html",
+      "outputSha256": "bd8ad1a68593b8b3f94beebf5d74510065ba237e79735f905bce3ede1d9115b2",
+      "headingCount": 5,
+      "visualClassification": "DATA_RELATIONSHIP",
+      "visualTitle": "SPICE port-order mapping",
+      "diagramAdded": true,
+      "evidence": [
+        {
+          "lineStart": 19,
+          "lineEnd": 38,
+          "summary": "Ordered PartialCkt ExtNode and SUBCKT ports map positionally; count mismatch blocks export."
+        }
+      ],
+      "urlCount": 6
+    }
+  ]
+}
