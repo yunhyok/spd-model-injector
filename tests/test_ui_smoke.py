@@ -70,8 +70,79 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert window.status_log.parent() is not work_splitter.widget(0)
     assert window.status_log.parent() is not work_splitter.widget(1)
     assert "Export RefDes Excel" in toolbar_actions
-    assert "Import RefDes Status Excel" in toolbar_actions
-    assert toolbar_actions.index("Import RefDes Status Excel") == toolbar_actions.index("Export RefDes Excel") + 1
+    assert "Import RefDes Excel" in toolbar_actions
+    assert toolbar_actions.index("Import RefDes Excel") == toolbar_actions.index("Export RefDes Excel") + 1
+
+
+def test_refdes_menu_and_drop_share_auto_detection_and_help_action(monkeypatch, tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.refdes_records = [RefDesRecord(component_name="CAP_0402", refdes_name="C1", activation_status="Enabled")]
+    selected = tmp_path / "input.xlsx"
+    selected.write_bytes(b"")
+    calls: list[Path] = []
+    monkeypatch.setattr(window, "import_refdes_file", lambda path: calls.append(Path(path)))
+    monkeypatch.setattr(
+        "spd_model_injector.ui.main_window.QFileDialog.getOpenFileName",
+        lambda *args: (str(selected), ""),
+    )
+
+    assert window.import_refdes_status_action is not None
+    window.import_refdes_status_action.setEnabled(True)
+    window.import_refdes_status_action.trigger()
+    window.import_refdes_drop_file(selected)
+
+    assert calls == [selected, selected]
+    help_action = next(action for action in window.help_menu.actions() if action.text() == "Input File Formats")
+    messages: list[str] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(str(args[2])))
+    help_action.trigger()
+    assert messages and all(token in messages[0] for token in ("Component changes", "Status updates", "optional", "aliases"))
+    assert window.import_refdes_status_action is not None
+    assert window.import_refdes_status_action.text() == "Import RefDes Excel"
+
+
+def test_refdes_import_aliases_and_headerless_four_column_status_are_partial(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+
+    def make_window() -> MainWindow:
+        window = MainWindow()
+        window.blocks = [_make_block("CAP_0402"), _make_block("Enabled")]
+        window.refdes_records = [
+            RefDesRecord(component_name="CAP_0402", refdes_name="C1", activation_status="Automatic"),
+            RefDesRecord(component_name="CAP_0402", refdes_name="C2", activation_status="Enabled"),
+        ]
+        window.rebuild_refdes_groups()
+        return window
+
+    def write_xlsx(name: str, rows: list[list[str]]) -> Path:
+        path = tmp_path / name
+        workbook = Workbook()
+        sheet = workbook.active
+        for row in rows:
+            sheet.append(row)
+        workbook.save(path)
+        return path
+
+    status_cases = [
+        ("two.xlsx", [["  rEfDeS  ", " activation status "], ["C1", "Disabled"]]),
+        ("three.xlsx", [["Component Name", " RefDes Name ", "Status"], ["CAP_0402", "C1", "Disabled"]]),
+        ("four.xlsx", [["component type", "REFDES", "Status", "NET"], ["CAP_0402", "C1", "Disabled", "ignored"]]),
+        ("headerless-four.xlsx", [["CAP_0402", "C1", "Disabled", ""], ["CAP_0402", "C2", "Disabled", "GND"]]),
+    ]
+    for name, rows in status_cases:
+        window = make_window()
+        path = write_xlsx(name, rows)
+        assert window.validate_refdes_status_file(path) == []
+        window.import_refdes_file(path)
+        assert window.effective_activation_status_for_refdes("C1") == "Disabled"
+        expected_c2 = "Disabled" if name == "headerless-four.xlsx" else "Enabled"
+        assert window.effective_activation_status_for_refdes("C2") == expected_c2
+
+    component_window = make_window()
+    component_path = write_xlsx("component-alias.xlsx", [[" RefDes ", " Component Name "], ["C1", "Enabled"]])
+    component_window.import_refdes_file(component_path)
+    assert component_window.refdes_component_changes == {"C1": "Enabled"}
 
 
 def test_main_window_refdes_list_has_framed_sortable_resizable_columns() -> None:
@@ -333,8 +404,7 @@ def test_main_window_accepts_partial_refdes_status_excel_and_rejects_unexpected_
 
     assert "Unexpected RefDes: C999_0" in window.validate_refdes_status_file(mismatch_path)
     assert window.validate_refdes_status_file(partial_path) == []
-    assert "Missing RefDes: C285_0" in window.validate_refdes_status_file(legacy_partial_path)
-    assert "RefDes count mismatch: expected 2, got 1" in window.validate_refdes_status_file(legacy_partial_path)
+    assert window.validate_refdes_status_file(legacy_partial_path) == []
 
     window.import_refdes_status_file(partial_path)
 
@@ -465,10 +535,10 @@ def test_main_window_refdes_drop_routes_status_and_component_xlsx(tmp_path: Path
 def test_main_window_accepts_casefold_status_headers_and_explicit_two_column_header(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     cases = [
-        (("Component", "RefDes Name", "Activation Status"), 3, True),
+        (("Component", "RefDes Name", "Activation Status"), 3, False),
         (("Component type", "REFDES", "Status"), 3, False),
         (("RefDes", "Status"), 2, False),
-        (("Component", "RefDes Name", "Activation Status", "Net Name"), 4, True),
+        (("Component", "RefDes Name", "Activation Status", "Net Name"), 4, False),
     ]
     for index, (header, column_count, requires_full) in enumerate(cases):
         window = MainWindow()
@@ -663,7 +733,7 @@ def test_main_window_refdes_status_import_rejects_unreadable_xlsx(tmp_path: Path
     errors = window.validate_refdes_status_file(bad_path)
 
     assert len(errors) == 1
-    assert "Could not read RefDes status Excel" in errors[0]
+    assert "Could not read RefDes status file" in errors[0]
 
 
 def test_main_window_changes_selected_refdes_activation_statuses(tmp_path: Path) -> None:

@@ -153,9 +153,11 @@ REFDES_STATUS_HEADERS = (
     PARTIAL_REFDES_STATUS_HEADER,
     REFDES_STATUS_HEADER,
 )
-REFDES_STATUS_HEADER_TOKENS = frozenset(value for header in REFDES_STATUS_HEADERS for value in header)
 IMPORTABLE_ACTIVATION_STATUS_TOKENS = frozenset(status.casefold() for status in IMPORTABLE_ACTIVATION_STATUSES)
-REFDES_STATUS_HEADER_TOKENS_CASEFOLD = frozenset(value.casefold() for value in REFDES_STATUS_HEADER_TOKENS)
+COMPONENT_HEADER_ALIASES = frozenset({"component", "component type", "component name"})
+REFDES_HEADER_ALIASES = frozenset({"refdes", "refdes name"})
+STATUS_HEADER_ALIASES = frozenset({"status", "activation status"})
+NET_HEADER_ALIASES = frozenset({"net", "net name"})
 
 
 class MainWindow(QMainWindow):
@@ -281,9 +283,9 @@ class MainWindow(QMainWindow):
         self.export_refdes_action.triggered.connect(self.export_refdes_dialog)
         toolbar.addAction(self.export_refdes_action)
 
-        self.import_refdes_status_action = QAction("Import RefDes Status Excel", self)
+        self.import_refdes_status_action = QAction("Import RefDes Excel", self)
         self.import_refdes_status_action.setEnabled(False)
-        self.import_refdes_status_action.triggered.connect(self.import_refdes_status_dialog)
+        self.import_refdes_status_action.triggered.connect(self.import_refdes_dialog)
         toolbar.addAction(self.import_refdes_status_action)
 
     def _build_menus(self) -> None:
@@ -294,6 +296,10 @@ class MainWindow(QMainWindow):
         self.undo_component_change_action.setEnabled(False)
         self.undo_component_change_action.triggered.connect(self.undo_refdes_component_change)
         edit_menu.addAction(self.undo_component_change_action)
+        self.help_menu = self.menuBar().addMenu("Help")
+        formats_action = QAction("Input File Formats", self)
+        formats_action.triggered.connect(self.show_input_file_formats)
+        self.help_menu.addAction(formats_action)
 
     def _build_layout(self) -> None:
         root = QSplitter(Qt.Orientation.Horizontal)
@@ -645,19 +651,38 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self._append_status(message)
 
-    def import_refdes_status_dialog(self) -> None:
+    def import_refdes_dialog(self) -> None:
         if not self.refdes_records:
-            QMessageBox.information(self, "Import RefDes Status Excel", "No RefDes records are loaded.")
+            QMessageBox.information(self, "Import RefDes Excel", "No RefDes records are loaded.")
             return
         directory = str(self.spd_path.parent) if self.spd_path else ""
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import RefDes Status Excel",
+            "Import RefDes Excel",
             directory,
-            "Excel files (*.xlsx);;All files (*)",
+            "RefDes files (*.xlsx *.csv);;All files (*)",
         )
         if path:
-            self.import_refdes_status_file(path)
+            self.import_refdes_file(path)
+
+    # Compatibility for callers using the pre-0.1.10 method name.
+    def import_refdes_status_dialog(self) -> None:
+        self.import_refdes_dialog()
+
+    def show_input_file_formats(self) -> None:
+        QMessageBox.information(
+            self,
+            "Input File Formats",
+            "Accepted RefDes files (XLSX or CSV):\n"
+            "• Component changes: RefDes | Component (optional header).\n"
+            "• Status updates: RefDes | Status; Component | RefDes | Status; "
+            "or Component | RefDes | Status | Net (Net is ignored).\n"
+            "Headers are optional, and header names are case-insensitive with surrounding whitespace ignored; aliases include "
+            "Component/Component type/Component Name, RefDes/RefDes Name, "
+            "Status/Activation Status, and Net/Net Name.\n"
+            "Status cells must be exactly Enabled, Disabled, Automatic, or Unknown (Unknown is valid only when already present). "
+            "Menu import and RefDes-table drag-and-drop use identical auto-detection.",
+        )
 
     def export_spd(self, output_path: str | Path) -> None:
         if self.spd_path is None:
@@ -1068,6 +1093,44 @@ class MainWindow(QMainWindow):
         statuses, components, requires_full_inventory, errors = self._parse_refdes_status_file(path)
         self._apply_refdes_status_import(statuses, components, requires_full_inventory, errors)
 
+    def import_refdes_file(self, path: str | Path) -> None:
+        file_path = Path(path)
+        try:
+            rows = _read_refdes_rows(file_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import RefDes Excel", f"Could not read RefDes file: {exc}")
+            return
+        if not rows:
+            QMessageBox.warning(self, "Import RefDes Excel", "RefDes file is empty.")
+            return
+        kind = _refdes_header_kind(rows[0][1])
+        if kind == "component":
+            self._import_refdes_component_rows(rows)
+            return
+        if kind in {"status2", "status3", "status4"}:
+            self._apply_refdes_status_import(*self._parse_refdes_status_rows(rows))
+            return
+        if _is_ambiguous_refdes_status_rows(rows, self.refdes_records, self.blocks):
+            QMessageBox.warning(
+                self,
+                "Import RefDes Excel",
+                "Ambiguous 2-column RefDes file: values resemble both activation statuses and component names. "
+                "Add either a RefDes | Component or RefDes | Status header.",
+            )
+            return
+        logical_count = _headerless_status_column_count(rows)
+        if logical_count in (3, 4) or (logical_count == 2 and _looks_like_refdes_status_rows(rows)):
+            self._apply_refdes_status_import(*self._parse_refdes_status_rows(rows))
+            return
+        self._import_refdes_component_rows(rows)
+
+    def _import_refdes_component_rows(self, rows: list[tuple[int, list[str]]]) -> None:
+        changes, errors = self._parse_refdes_component_rows(rows)
+        if errors:
+            QMessageBox.warning(self, "Import RefDes Component Changes", "\n".join(errors))
+            return
+        self.apply_refdes_component_change_map(changes)
+
     def _apply_refdes_status_import(
         self,
         statuses: dict[str, str],
@@ -1078,7 +1141,7 @@ class MainWindow(QMainWindow):
         if not errors:
             errors = self._validate_imported_refdes_statuses(statuses, components, requires_full_inventory)
         if errors:
-            QMessageBox.warning(self, "Import RefDes Status Excel", "\n".join(errors))
+            QMessageBox.warning(self, "Import RefDes Excel", "\n".join(errors))
             return
         changed = 0
         for refdes_name, activation_status in statuses.items():
@@ -1089,27 +1152,7 @@ class MainWindow(QMainWindow):
         self._after_refdes_status_change(f"Imported {changed} RefDes activation status value(s).")
 
     def import_refdes_drop_file(self, path: str | Path) -> None:
-        file_path = Path(path)
-        if file_path.suffix.lower() == ".xlsx":
-            try:
-                rows = _read_refdes_component_xlsx(file_path)
-            except Exception as exc:
-                QMessageBox.warning(self, "Import RefDes Excel", f"Could not read RefDes Excel: {exc}")
-                return
-            if _is_ambiguous_refdes_status_rows(rows, self.refdes_records, self.blocks):
-                QMessageBox.warning(
-                    self,
-                    "Import RefDes Excel",
-                    "Ambiguous 2-column RefDes Excel: values resemble both activation statuses and component names. "
-                    "Add an explicit RefDes | Status header for status updates, or use Import RefDes Component Changes "
-                    "for component assignments.",
-                )
-                return
-            if _looks_like_refdes_status_rows(rows):
-                parsed = self._parse_refdes_status_rows(rows)
-                self._apply_refdes_status_import(*parsed)
-                return
-        self.import_refdes_component_changes_file(file_path)
+        self.import_refdes_file(path)
 
     def load_refdes_component_change_file(self, path: str | Path) -> dict[str, str]:
         changes, errors = self._parse_refdes_component_change_file(path)
@@ -1166,12 +1209,24 @@ class MainWindow(QMainWindow):
 
     def _parse_refdes_component_change_file(self, path: str | Path) -> tuple[dict[str, str], list[str]]:
         file_path = Path(path)
-        if file_path.suffix.lower() == ".csv":
-            rows = _read_refdes_component_csv(file_path)
-        elif file_path.suffix.lower() == ".xlsx":
-            rows = _read_refdes_component_xlsx(file_path)
-        else:
-            return {}, [f"Unsupported file type: {file_path.suffix}"]
+        try:
+            rows = _read_refdes_rows(file_path)
+        except ValueError as exc:
+            return {}, [str(exc)]
+        except Exception as exc:
+            return {}, [f"Could not read RefDes component file: {exc}"]
+        return self._parse_refdes_component_rows(rows)
+
+    def _parse_refdes_component_rows(
+        self,
+        rows: list[tuple[int, list[str]]],
+    ) -> tuple[dict[str, str], list[str]]:
+        if not rows:
+            return {}, ["RefDes component file is empty."]
+        if _refdes_header_kind(rows[0][1]) == "component":
+            rows = rows[1:]
+        if not rows:
+            return {}, ["RefDes component file has no data rows."]
 
         changes: dict[str, str] = {}
         errors: list[str] = []
@@ -1196,13 +1251,10 @@ class MainWindow(QMainWindow):
         path: str | Path,
     ) -> tuple[dict[str, str], dict[str, str], bool, list[str]]:
         file_path = Path(path)
-        if file_path.suffix.lower() != ".xlsx":
-            return {}, {}, False, [f"Unsupported file type: {file_path.suffix}"]
-
         try:
-            rows = _read_refdes_component_xlsx(file_path)
+            rows = _read_refdes_rows(file_path)
         except Exception as exc:
-            return {}, {}, False, [f"Could not read RefDes status Excel: {exc}"]
+            return {}, {}, False, [f"Could not read RefDes status file: {exc}"]
         return self._parse_refdes_status_rows(rows)
 
     def _parse_refdes_status_rows(
@@ -1212,7 +1264,7 @@ class MainWindow(QMainWindow):
         if not rows:
             return {}, {}, False, ["RefDes status file is empty."]
         header_row, header_values = rows[0]
-        recognized_header = _refdes_status_header_kind(header_values)
+        recognized_header = _refdes_header_kind(header_values)
         if recognized_header is None:
             # A row whose leading cells look like a header is almost certainly a malformed
             # header, not a headerless data row. Keep the existing actionable error.
@@ -1227,25 +1279,18 @@ class MainWindow(QMainWindow):
             if header_like_count >= 2:
                 expected_headers = " or ".join(", ".join(header) for header in REFDES_STATUS_HEADERS)
                 return {}, {}, False, [f"Row {header_row}: expected header: {expected_headers}"]
-            trimmed_header_values = list(header_values)
-            while trimmed_header_values and not trimmed_header_values[-1].strip():
-                trimmed_header_values.pop()
-            column_count = len(trimmed_header_values)
-            if column_count not in (2, 3):
+            column_count = _headerless_status_column_count(rows)
+            if column_count not in (2, 3, 4):
                 expected_headers = " or ".join(", ".join(header) for header in REFDES_STATUS_HEADERS)
                 return {}, {}, False, [f"Row {header_row}: expected header: {expected_headers}"]
             header = None
             requires_full_inventory = False
-            has_net_name_column = False
+            has_net_name_column = column_count == 4
             headerless_columns = column_count
         else:
             header = recognized_header
-            requires_full_inventory = header in (
-                LEGACY_REFDES_STATUS_HEADER,
-                LEGACY_REFDES_STATUS_EXPORT_HEADER[:3],
-                LEGACY_REFDES_STATUS_EXPORT_HEADER,
-            )
-            has_net_name_column = header == LEGACY_REFDES_STATUS_EXPORT_HEADER
+            requires_full_inventory = False
+            has_net_name_column = header == "status4"
             headerless_columns = 0
             if len(rows) == 1:
                 return {}, {}, requires_full_inventory, ["RefDes status file has no data rows."]
@@ -1254,7 +1299,7 @@ class MainWindow(QMainWindow):
         components: dict[str, str] = {}
         errors: list[str] = []
         data_rows = rows[1:] if header is not None else rows
-        is_two_column = headerless_columns == 2 or header == REFDES_STATUS_HEADER
+        is_two_column = headerless_columns == 2 or header == "status2"
         for row_number, values in data_rows:
             if is_two_column:
                 component_name = ""
@@ -1278,7 +1323,7 @@ class MainWindow(QMainWindow):
                     errors.append(f"Row {row_number}: Component, RefDes Name, and Activation Status are required.")
                 continue
             if extra_values:
-                expected_columns = 2 if is_two_column else 3
+                expected_columns = 2 if is_two_column else (4 if has_net_name_column else 3)
                 errors.append(f"Row {row_number}: expected exactly {expected_columns} columns.")
                 continue
             if refdes_name in statuses:
@@ -1363,24 +1408,54 @@ def _read_refdes_component_xlsx(path: Path) -> list[tuple[int, list[str]]]:
     return rows
 
 
-def _is_refdes_status_header(values: list[str]) -> bool:
-    return _refdes_status_header_kind(values) is not None
+def _read_refdes_rows(path: Path) -> list[tuple[int, list[str]]]:
+    if path.suffix.lower() == ".csv":
+        return _read_refdes_component_csv(path)
+    if path.suffix.lower() == ".xlsx":
+        return _read_refdes_component_xlsx(path)
+    raise ValueError(f"Unsupported file type: {path.suffix}")
 
 
 def _normalize_header_value(value: str) -> str:
     return value.strip().casefold()
 
 
-def _refdes_status_header_kind(values: list[str]) -> tuple[str, ...] | None:
-    normalized = tuple(_normalize_header_value(value) for value in values)
-    if normalized[:4] == tuple(_normalize_header_value(value) for value in LEGACY_REFDES_STATUS_EXPORT_HEADER):
-        return LEGACY_REFDES_STATUS_EXPORT_HEADER if not any(value.strip() for value in values[4:]) else None
-    if normalized[:3] == tuple(_normalize_header_value(value) for value in LEGACY_REFDES_STATUS_HEADER):
-        return LEGACY_REFDES_STATUS_HEADER if not any(value.strip() for value in values[3:]) else None
-    if normalized[:3] == tuple(_normalize_header_value(value) for value in PARTIAL_REFDES_STATUS_HEADER):
-        return PARTIAL_REFDES_STATUS_HEADER if not any(value.strip() for value in values[3:]) else None
-    if normalized[:2] == tuple(_normalize_header_value(value) for value in REFDES_STATUS_HEADER):
-        return REFDES_STATUS_HEADER if not any(value.strip() for value in values[2:]) else None
+def _logical_column_count(values: list[str]) -> int:
+    trimmed = list(values)
+    while trimmed and not trimmed[-1].strip():
+        trimmed.pop()
+    return len(trimmed)
+
+
+def _headerless_status_column_count(rows: list[tuple[int, list[str]]]) -> int:
+    counts = [_logical_column_count(values) for _, values in rows]
+    if any(count >= 4 for count in counts):
+        return 4
+    return counts[0]
+
+
+def _refdes_header_kind(values: list[str]) -> str | None:
+    normalized = [_normalize_header_value(value) for value in values]
+    while normalized and not normalized[-1]:
+        normalized.pop()
+    if len(normalized) == 2:
+        if normalized[0] in REFDES_HEADER_ALIASES and normalized[1] in COMPONENT_HEADER_ALIASES:
+            return "component"
+        if normalized[0] in REFDES_HEADER_ALIASES and normalized[1] in STATUS_HEADER_ALIASES:
+            return "status2"
+    if len(normalized) == 3 and (
+        normalized[0] in COMPONENT_HEADER_ALIASES
+        and normalized[1] in REFDES_HEADER_ALIASES
+        and normalized[2] in STATUS_HEADER_ALIASES
+    ):
+        return "status3"
+    if len(normalized) == 4 and (
+        normalized[0] in COMPONENT_HEADER_ALIASES
+        and normalized[1] in REFDES_HEADER_ALIASES
+        and normalized[2] in STATUS_HEADER_ALIASES
+        and normalized[3] in NET_HEADER_ALIASES
+    ):
+        return "status4"
     return None
 
 
@@ -1389,7 +1464,7 @@ def _looks_like_refdes_status_rows(rows: list[tuple[int, list[str]]]) -> bool:
         return False
     values = rows[0][1]
     nonempty_values = [value.strip() for value in values if value.strip()]
-    if _is_refdes_status_header(values):
+    if _refdes_header_kind(values) in {"status2", "status3", "status4"}:
         return True
     if len(nonempty_values) >= 3:
         return True
@@ -1412,7 +1487,7 @@ def _is_ambiguous_refdes_status_rows(
     refdes_records: list[RefDesRecord],
     blocks: list[PartialCktBlock],
 ) -> bool:
-    if not rows or _is_refdes_status_header(rows[0][1]):
+    if not rows or _refdes_header_kind(rows[0][1]) is not None:
         return False
     first_values = rows[0][1]
     first_trimmed = list(first_values)
