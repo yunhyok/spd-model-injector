@@ -41,7 +41,14 @@ from PySide6.QtWidgets import (
 
 from spd_model_injector import __version__
 from spd_model_injector.core.refdes_export import export_refdes_xlsx
-from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, SpdInventory, read_block_body
+from spd_model_injector.core.spd import (
+    PartialCktBlock,
+    PortRequest,
+    RefDesRecord,
+    SpdInventory,
+    read_block_body,
+    validate_port_requests,
+)
 from spd_model_injector.core.spice import ModelValidationError, prepare_model_for_partialckt
 from spd_model_injector.ui.workers import ExportWorker, ScanWorker
 
@@ -180,6 +187,7 @@ class MainWindow(QMainWindow):
         self.replacements: dict[str, str] = {}
         self.component_renames: dict[str, str] = {}
         self.component_clones: dict[str, str] = {}
+        self.pending_port_requests: list[PortRequest] = []
         self._loading_editor = False
         self._busy = False
         self._scan_thread: QThread | None = None
@@ -189,6 +197,7 @@ class MainWindow(QMainWindow):
         self.export_refdes_action: QAction | None = None
         self.import_refdes_status_action: QAction | None = None
         self.undo_component_change_action: QAction | None = None
+        self.generate_port_action: QAction | None = None
 
         self.component_list_label = QLabel("PartialCkt Components (0/0)")
         self.component_filter = QLineEdit()
@@ -207,6 +216,15 @@ class MainWindow(QMainWindow):
 
         self.refdes_label = QLabel("Load an SPD file to inspect RefDes records.")
         self.refdes_label.setWordWrap(True)
+        self.target_net_selector = QComboBox()
+        self.target_net_selector.setObjectName("target_net_selector")
+        self.target_net_selector.setPlaceholderText("Target NET")
+        self.reference_net_selector = QComboBox()
+        self.reference_net_selector.setObjectName("reference_net_selector")
+        self.reference_net_selector.setPlaceholderText("Reference NET")
+        for selector in (self.target_net_selector, self.reference_net_selector):
+            selector.setEnabled(False)
+            selector.currentIndexChanged.connect(self._update_generate_port_state)
         self.refdes_table = DropRefDesTable(0, 2)
         self.refdes_table.setHorizontalHeaderLabels(["RefDes Name", "Activation Status"])
         self.refdes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -218,6 +236,7 @@ class MainWindow(QMainWindow):
         self.refdes_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.refdes_table.customContextMenuRequested.connect(self._show_refdes_context_menu)
         self.refdes_table.fileDropped.connect(self.import_refdes_drop_file)
+        self.refdes_table.itemSelectionChanged.connect(self._update_generate_port_state)
         refdes_header = self.refdes_table.horizontalHeader()
         refdes_header.setSectionsClickable(True)
         refdes_header.setSortIndicatorShown(True)
@@ -282,6 +301,12 @@ class MainWindow(QMainWindow):
         self.export_action.setToolTip("Export a new SPD with modified bodies replaced (Ctrl+E)")
         self.export_action.triggered.connect(self.export_spd_dialog)
         toolbar.addAction(self.export_action)
+
+        self.generate_port_action = QAction("Generate Port", self)
+        self.generate_port_action.setToolTip("Queue a PowerSI Port for the selected RefDes instances")
+        self.generate_port_action.setEnabled(False)
+        self.generate_port_action.triggered.connect(self.generate_ports)
+        toolbar.addAction(self.generate_port_action)
 
         self.export_refdes_action = QAction("Export RefDes Excel", self)
         self.export_refdes_action.setEnabled(False)
@@ -357,6 +382,10 @@ class MainWindow(QMainWindow):
         refdes_layout.setSpacing(6)
         refdes_layout.addWidget(QLabel("RefDes List"))
         refdes_layout.addWidget(self.refdes_label)
+        net_row = QHBoxLayout()
+        net_row.addWidget(self.target_net_selector, 1)
+        net_row.addWidget(self.reference_net_selector, 1)
+        refdes_layout.addLayout(net_row)
         refdes_layout.addWidget(self.refdes_table, 1)
         work_splitter.addWidget(self.refdes_panel)
         work_splitter.setSizes([720, 380])
@@ -387,6 +416,7 @@ class MainWindow(QMainWindow):
             self.import_refdes_status_action.setEnabled(not busy and bool(self.refdes_records))
         for button in (self.import_button, self.validate_button):
             button.setEnabled(not busy)
+        self._update_generate_port_state()
 
     def _clear_scan_refs(self) -> None:
         if self.sender() is self._scan_thread:
@@ -424,6 +454,8 @@ class MainWindow(QMainWindow):
         self.replacements.clear()
         self.component_renames.clear()
         self.component_clones.clear()
+        self.pending_port_requests.clear()
+        self._set_net_selectors((), ())
         self.component_list.clear()
         if self.component_filter.text():
             self.component_filter.blockSignals(True)
@@ -486,6 +518,8 @@ class MainWindow(QMainWindow):
         self.component_renames.clear()
         self.component_clones.clear()
         self.populate_components()
+        net_names = self._inventory_net_names(inventory)
+        self._set_net_selectors(self._inventory_power_nets(inventory), net_names, self._inventory_ground_nets(inventory))
         self._update_undo_component_change_action()
         if self.export_refdes_action is not None:
             self.export_refdes_action.setEnabled(bool(self.refdes_records))
@@ -516,6 +550,8 @@ class MainWindow(QMainWindow):
         self.replacements.clear()
         self.component_renames.clear()
         self.component_clones.clear()
+        self.pending_port_requests.clear()
+        self._set_net_selectors((), ())
         self.component_list.clear()
         self._update_component_header()
         self._update_undo_component_change_action()
@@ -627,7 +663,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones:
+        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self.pending_port_requests:
             confirm = QMessageBox.question(
                 self,
                 "Export",
@@ -715,6 +751,8 @@ class MainWindow(QMainWindow):
             list(self.refdes_records),
             dict(self.component_renames),
             dict(self.component_clones),
+            port_requests=list(self.pending_port_requests),
+            inventory=self.inventory,
         )
         self._export_worker.moveToThread(self._export_thread)
         self._export_thread.started.connect(self._export_worker.run)
@@ -727,6 +765,7 @@ class MainWindow(QMainWindow):
         self._export_thread.start()
 
     def _export_finished(self, output_path: str) -> None:
+        self.pending_port_requests.clear()
         self.progress.setVisible(False)
         self._set_busy(False)
         message = f"Exported to {output_path}"
@@ -845,6 +884,81 @@ class MainWindow(QMainWindow):
             self.refdes_table.setItem(row, 0, refdes_item)
             self.refdes_table.setItem(row, 1, QTableWidgetItem(record.activation_status))
         self.refdes_table.setSortingEnabled(sorting_enabled)
+        self._update_generate_port_state()
+
+    def _inventory_net_names(self, inventory: SpdInventory) -> tuple[str, ...]:
+        return tuple(sorted({str(name) for name in inventory.net_names if str(name)}))
+
+    def _inventory_ground_nets(self, inventory: SpdInventory) -> tuple[str, ...]:
+        return tuple(sorted({str(name) for name in inventory.ground_nets if str(name)}))
+
+    def _inventory_power_nets(self, inventory: SpdInventory) -> tuple[str, ...]:
+        return tuple(sorted({str(name) for name in inventory.power_nets if str(name)}))
+
+    def _set_net_selectors(self, target_nets, reference_nets, default_reference_nets=()) -> None:
+        target_nets = tuple(target_nets)
+        reference_nets = tuple(reference_nets)
+        default_reference_nets = tuple(default_reference_nets)
+        for selector, values in ((self.target_net_selector, target_nets), (self.reference_net_selector, reference_nets)):
+            selector.blockSignals(True)
+            selector.clear()
+            selector.addItem("", "")
+            for value in values:
+                selector.addItem(str(value), str(value))
+            selector.blockSignals(False)
+            selector.setEnabled(bool(values))
+        # An unambiguous GroundNets mapping is the safe default.
+        defaults = [net for net in default_reference_nets if net in reference_nets]
+        if len(defaults) == 1:
+            self.reference_net_selector.setCurrentText(defaults[0])
+        self._update_generate_port_state()
+
+    def _update_generate_port_state(self) -> None:
+        action = self.generate_port_action
+        if action is None:
+            return
+        action.setEnabled(
+            not self._busy
+            and self.spd_path is not None
+            and self.inventory.port_insertion_offset is not None
+            and bool(self.target_net_selector.currentData())
+            and bool(self.reference_net_selector.currentData())
+            and self.target_net_selector.currentData() != self.reference_net_selector.currentData()
+            and bool(self.selected_refdes_names())
+        )
+
+    def generate_ports(self) -> None:
+        target = str(self.target_net_selector.currentData() or "")
+        reference = str(self.reference_net_selector.currentData() or "")
+        names = self.selected_refdes_names()
+        if not target or not reference or target == reference or not names:
+            self._append_status("Generate Port requires target/reference NET and one or more RefDes selections.")
+            self._update_generate_port_state()
+            return
+        existing_keys = set(self.inventory.existing_port_keys)
+        pending_keys = {(request.instance, request.target_net) for request in self.pending_port_requests}
+        requests = [PortRequest(instance=name, target_net=target, reference_net=reference) for name in sorted(names)]
+        request_keys = {(request.instance, request.target_net) for request in requests}
+        duplicate_keys = (request_keys & existing_keys) | (request_keys & pending_keys)
+        if duplicate_keys:
+            details = ", ".join(f"{instance}/{net}" for instance, net in sorted(duplicate_keys))
+            self._append_status(f"Generate Port rejected; existing or queued request(s): {details}")
+            return
+        try:
+            validate_port_requests(
+                self.spd_path,
+                requests,
+                refdes_records=self.refdes_records,
+                inventory=self.inventory,
+                revalidate_metadata=False,
+            )
+        except Exception as exc:
+            self._append_status(f"Generate Port rejected: {exc}")
+            return
+        self.pending_port_requests.extend(requests)
+        self._append_status(f"Queued {len(requests)} Port request(s): {', '.join(r.instance for r in requests)}")
+        self._update_generate_port_state()
+
 
     def _show_refdes_context_menu(self, position) -> None:
         row = self.refdes_table.indexAt(position).row()
@@ -858,6 +972,8 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self.refdes_table)
         change_action = menu.addAction(f"Change Component... ({len(refdes_names)} RefDes)")
+        generate_action = menu.addAction(f"Generate Port ({len(refdes_names)} RefDes)")
+        generate_action.setEnabled(self.generate_port_action is not None and self.generate_port_action.isEnabled())
         menu.addSeparator()
         status_actions = {
             menu.addAction(f"Set Status: {status}"): status
@@ -866,6 +982,8 @@ class MainWindow(QMainWindow):
         selected_action = menu.exec(self.refdes_table.viewport().mapToGlobal(position))
         if selected_action is change_action:
             self.change_selected_refdes_components(refdes_names)
+        elif selected_action is generate_action:
+            self.generate_ports()
         elif selected_action in status_actions:
             self.apply_refdes_activation_status_changes(refdes_names, status_actions[selected_action])
 

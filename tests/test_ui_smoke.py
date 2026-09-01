@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderVi
 
 from spd_model_injector import __version__
 from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, SpdInventory
+from spd_model_injector.core.spd import PortRequest
 from spd_model_injector.ui.main_window import MainWindow
 from spd_model_injector.ui.workers import ExportWorker
 
@@ -1001,3 +1002,62 @@ def test_editor_uses_fixed_pitch_font_and_no_wrap() -> None:
 
     assert window.editor.font().fixedPitch()
     assert window.editor.lineWrapMode() == QPlainTextEdit.LineWrapMode.NoWrap
+
+
+def test_generate_port_queues_selected_refdes_and_export_worker_forwards_requests(tmp_path: Path, monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    source = tmp_path / "board.spd"
+    source.write_text("source\n", encoding="utf-8")
+    record = RefDesRecord(
+        component_name="CAP",
+        refdes_name="C1",
+        activation_status="Automatic",
+        net_name="VDD",
+        unique_net_names=("DGND", "VDD"),
+    )
+    record2 = RefDesRecord("CAP", "C2", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"))
+    window.spd_path = source
+    window.inventory = SpdInventory(
+        [], [record, record2], ground_nets=("DGND",), net_names=("DGND", "VDD"), existing_port_keys=(), port_insertion_offset=1,
+    )
+    window.blocks = [_make_block("CAP")]
+    window.refdes_records = [record, record2]
+    window.rebuild_refdes_groups()
+    window._set_net_selectors(("DGND", "VDD"), ("DGND", "VDD"), ("DGND",))
+    window._populate_refdes_table("CAP")
+    window.refdes_table.selectRow(0)
+    window.refdes_table.selectionModel().select(
+        window.refdes_table.model().index(1, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    )
+    window.target_net_selector.setCurrentText("VDD")
+
+    assert window.generate_port_action.isEnabled()
+    window.reference_net_selector.setCurrentText("VDD")
+    assert not window.generate_port_action.isEnabled()
+    window.reference_net_selector.setCurrentText("DGND")
+    window._set_busy(True)
+    assert not window.generate_port_action.isEnabled()
+    window._set_busy(False)
+    window.inventory = SpdInventory([], [record, record2], ground_nets=("DGND",), net_names=("DGND", "VDD"))
+    window._update_generate_port_state()
+    assert not window.generate_port_action.isEnabled()
+    window.inventory = SpdInventory([], [record, record2], ground_nets=("DGND",), net_names=("DGND", "VDD"), port_insertion_offset=1)
+    window._update_generate_port_state()
+    assert window.generate_port_action.isEnabled()
+    monkeypatch.setattr("spd_model_injector.ui.main_window.validate_port_requests", lambda *args, **kwargs: [])
+    window.generate_ports()
+    assert window.pending_port_requests == [
+        PortRequest(instance="C1", target_net="VDD", reference_net="DGND"),
+        PortRequest(instance="C2", target_net="VDD", reference_net="DGND"),
+    ]
+    assert "Queued 2 Port request" in window.status_log.toPlainText()
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("spd_model_injector.ui.workers.write_spd_with_replacements", lambda *args, **kwargs: captured.update(kwargs))
+    worker = ExportWorker(
+        source, tmp_path / "out.spd", window.blocks, {}, port_requests=window.pending_port_requests, inventory=window.inventory
+    )
+    worker.run()
+    assert captured["port_requests"] == window.pending_port_requests
+    assert captured["inventory"] is window.inventory

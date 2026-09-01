@@ -18,7 +18,12 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Remove `.SUBCKT` and `.ENDS` wrapper lines before injection.
 - Replace the existing PartialCkt body and export to a new SPD path.
 - Right-click a PartialCkt component to clone it (without cloning RefDes instances) or rename it; exports preserve `.Part` continuation lines and update `.Connect` references.
+- Queue exact two-terminal PowerSI ports for selected RefDes rows, then write them only through `Export New SPD` without modifying the source file.
 - Write output as UTF-8 with LF line endings.
+
+## Generate Port
+
+After loading an SPD, choose an exact target NET and reference NET, select one or more rows in the RefDes table, and use `Generate Port`. The queued ports are written immediately before the existing `.EndPort` only when you export a new SPD. Components with missing, extra, unannotated, or ambiguous Package Nodes are rejected as one batch.
 
 ## Port Mapping Rule
 

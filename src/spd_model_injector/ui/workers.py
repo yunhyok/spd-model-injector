@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, scan_spd_inventory, write_spd_with_replacements
+from spd_model_injector.core.spd import PartialCktBlock, PortRequest, RefDesRecord, SpdInventory, scan_spd_inventory, write_spd_with_replacements
 
 
 class ScanWorker(QObject):
@@ -39,6 +39,8 @@ class ExportWorker(QObject):
         refdes_records: list[RefDesRecord] | None = None,
         component_renames: dict[str, str] | None = None,
         component_clones: dict[str, str] | None = None,
+        port_requests: list[PortRequest] | None = None,
+        inventory: SpdInventory | None = None,
     ) -> None:
         super().__init__()
         self.source_path = Path(source_path)
@@ -50,6 +52,8 @@ class ExportWorker(QObject):
         self.refdes_records = refdes_records
         self.component_renames = component_renames or {}
         self.component_clones = component_clones or {}
+        self.port_requests = list(port_requests or [])
+        self.inventory = inventory
 
     @Slot()
     def run(self) -> None:
@@ -64,6 +68,8 @@ class ExportWorker(QObject):
                 refdes_records=self.refdes_records,
                 component_renames=self.component_renames,
                 component_clones=self.component_clones,
+                port_requests=self.port_requests,
+                inventory=self.inventory,
             )
             self.finished.emit(str(self.output_path))
         except Exception as exc:  # pragma: no cover - surfaced to UI
