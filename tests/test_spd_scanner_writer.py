@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from spd_model_injector.core import spd
-from spd_model_injector.core.spd import read_block_body, scan_spd, scan_spd_inventory, write_spd_with_replacements
+from spd_model_injector.core.spd import PortRequest, read_block_body, read_connect_nodes, scan_spd, scan_spd_inventory, write_spd_with_replacements
 
 
 def test_scan_spd_reads_partialckt_blocks_and_extnode_continuations(tmp_path: Path) -> None:
@@ -442,3 +442,105 @@ def test_scan_spd_handles_mixed_case_markers_and_word_boundaries(tmp_path: Path)
     body = read_block_body(spd_path, blocks[0])
     assert ".EndPartialCktExtra keep-me" in body
     assert "C 1 2 1u" in body
+
+
+def test_generate_port_resolves_selected_connect_and_inserts_before_endport(tmp_path: Path) -> None:
+    source = tmp_path / "ports.spd"
+    output = tmp_path / "ports_out.spd"
+    source.write_text(
+        ".PartialCkt CAP ExtNode = 1 2\n.Port\nC 1 2 1u\n.EndPartialCkt\n"
+        ".Connect C2 CAP Checked = 1\n"
+        "1 $Package.Node10!!1::VDD\n2 $Package.Node11!!2::DGND\n.EndC\n"
+        ".Connect C3 CAP Checked = 1\n"
+        "1 $Package.Node12!!1::VDD\n2 $Package.Node13!!2::DGND\n.EndC\n"
+        ".Port\nPort7_C2_1::VDD Auto GenFromCktInstance=\"C2\" GenFromCktModel=\"DUT\"\n"
+        "+            PositiveTerminal $Package.Node1!!1::VDD\n"
+        "+            NegativeTerminal $Package.Node2!!2::DGND\n.EndPort\n"
+        ".NetList\n VDD -> PowerNets Color = RED\n VDD_AUX Color = RED\n VDD_OFF::Unselected||DropShape Color = BLUE\n DGND -> GroundNets Color = BLUE Voltage = 0\n.EndNetList\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    inventory = scan_spd_inventory(source)
+    record = inventory.refdes_records[0]
+    assert record.connect_block_end_offset is not None
+    assert record.unique_net_names == ("DGND", "VDD")
+    assert record.package_node_count == record.annotated_node_count == 2
+    assert [(node.pin, node.net_name) for node in read_connect_nodes(source, record)] == [("1", "VDD"), ("2", "DGND")]
+    assert inventory.max_port_number == 7
+    assert inventory.existing_port_keys == (("C2", "VDD"),)
+    assert inventory.power_nets == ("VDD", "VDD_AUX")
+    assert "VDD_OFF" not in inventory.net_names
+    write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
+                                port_requests=[PortRequest("C3", "VDD", "DGND")], inventory=inventory)
+    text = output.read_text(encoding="utf-8")
+    assert "Port8_C3_1::VDD Auto GenFromCktInstance=\"C3\" GenFromCktModel=\"CAP\"" in text
+    assert text.index("Port8_C3_1") < text.index(".EndPort")
+    assert text.count(".EndPort") == 1
+
+
+def test_generate_port_batch_rejects_invalid_mapping_before_output_creation(tmp_path: Path) -> None:
+    source = tmp_path / "invalid.spd"
+    output = tmp_path / "invalid_out.spd"
+    source.write_text(
+        ".Connect C1 CAP Checked = 1\n1 $Package.Node1!!1::VDD\n.EndC\n"
+        ".Port\nPort1_OLD::VDD Auto\n.EndPort\n"
+        ".NetList\nVDD -> PowerNets Color = RED\nDGND -> GroundNets Color = BLUE\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    with pytest.raises(ValueError, match="exact two-terminal"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
+                                    port_requests=[PortRequest("C1", "VDD", "DGND")], inventory=inventory)
+    assert not output.exists()
+
+
+def test_generate_port_rejects_multiple_port_sections(tmp_path: Path) -> None:
+    source = tmp_path / "multi.spd"
+    output = tmp_path / "multi_out.spd"
+    source.write_text(
+        ".Connect C1 CAP Checked = 1\n1 $Package.Node1!!1::VDD\n2 $Package.Node2!!2::DGND\n.EndC\n"
+        ".Port\n.EndPort\n.Port\n.EndPort\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    assert inventory.port_insertion_offset is None
+    with pytest.raises(ValueError, match="safe .Port"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
+                                    port_requests=[PortRequest("C1", "VDD", "DGND")], inventory=inventory)
+    assert not output.exists()
+
+
+def test_generate_port_rejects_stale_port_metadata_without_touching_output(tmp_path: Path) -> None:
+    source = tmp_path / "stale.spd"
+    output = tmp_path / "stale_out.spd"
+    source.write_text(
+        ".Connect C1 CAP Checked = 1\n1 $Package.Node1!!1::VDD\n2 $Package.Node2!!2::DGND\n.EndC\n"
+        ".Connect C2 CAP Checked = 1\n1 $Package.Node3!!1::VDD\n2 $Package.Node4!!2::DGND\n.EndC\n"
+        ".Port\nPort7_C1_1::VDD Auto GenFromCktInstance=\"C1\"\n"
+        "+ PositiveTerminal $Package.Node1!!1::VDD\n+ NegativeTerminal $Package.Node2!!2::DGND\n.EndPort\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    source.write_text(source.read_text(encoding="utf-8").replace("Port7_C1_1", "Port8_C1_1"), encoding="utf-8")
+    output.write_text("sentinel", encoding="utf-8")
+    with pytest.raises(ValueError, match="metadata changed"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
+                                    port_requests=[PortRequest("C2", "VDD", "DGND")], inventory=inventory)
+    assert output.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_generate_port_rejects_duplicate_package_node_base(tmp_path: Path) -> None:
+    source = tmp_path / "duplicate-node.spd"
+    output = tmp_path / "duplicate-node-out.spd"
+    source.write_text(
+        ".Connect C1 CAP Checked = 1\n1 $Package.Node1!!1::VDD\n2 $Package.Node1!!2::DGND\n.EndC\n"
+        ".Port\nPort1_OLD::VDD Auto\n.EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    output.write_text("sentinel", encoding="utf-8")
+    with pytest.raises(ValueError, match="exact two-terminal"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
+                                    port_requests=[PortRequest("C1", "VDD", "DGND")], inventory=inventory)
+    assert output.read_text(encoding="utf-8") == "sentinel"
