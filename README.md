@@ -23,7 +23,9 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 ## Generate Port
 
-After loading an SPD, choose an exact target NET and reference NET, select one or more rows in the RefDes table, and use `Generate Port`. The queued ports are written immediately before the existing `.EndPort` only when you export a new SPD. Components with missing, extra, unannotated, or ambiguous Package Nodes are rejected as one batch.
+The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. After loading an SPD, the right edge provides separate `Model & RefDes` and `Port Generation` workspaces. Select one exact target NET, one exact reference NET, and one or more RefDes rows in the Port Generation workspace, then choose `Generate Port` to queue the requests. Review the queue and use `Export New SPD` to write them immediately before the existing `.EndPort`; the source file is never modified. Components with missing, extra, unannotated, or ambiguous Package Nodes are rejected as one batch.
+
+Port Generation is unavailable when the loaded SPD does not contain one safe existing `.Port`/`.EndPort` section. The application does not create missing Port sections.
 
 ## Port Mapping Rule
 

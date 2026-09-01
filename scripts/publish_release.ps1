@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.2.0",
+    [string]$Version = "0.3.0",
     [string]$Repo = "spd-model-injector"
 )
 
@@ -25,4 +25,4 @@ if (-not (Test-Path $installer)) {
     throw "Installer artifact not found: $installer. Run scripts/build.ps1 first."
 }
 
-gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Added Generate Port for queuing exact two-terminal RefDes ports and exporting them safely into a new SPD."
+gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Separated Model & RefDes and Port Generation into right-edge workspaces, organized commands under File/Edit/Model/Port/View/Help, and kept Port export fail-closed for unsafe or missing Port sections."
