@@ -5,8 +5,8 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from openpyxl import Workbook, load_workbook
-from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QMessageBox, QPlainTextEdit, QSplitter
+from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer, Qt
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QMessageBox, QPlainTextEdit, QSplitter, QTabWidget
 
 from spd_model_injector import __version__
 from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, SpdInventory
@@ -54,25 +54,43 @@ def test_main_window_has_expected_title_and_empty_initial_state() -> None:
 
 
 def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
 
     window = MainWindow()
     root = window.centralWidget()
     work_splitter = window.findChild(QSplitter, "work_splitter")
-    toolbar_actions = [action.text() for action in window.toolBar.actions()]
 
-    assert isinstance(root, QSplitter)
-    assert root.count() == 2
+    tabs = window.workspace_tabs
+    assert root is not tabs
+    assert tabs.count() == 2
+    assert tabs.tabPosition() == QTabWidget.TabPosition.East
+    assert [tabs.tabText(i) for i in range(tabs.count())] == ["Model & RefDes", "Port Generation"]
     assert work_splitter is not None
-    assert work_splitter.orientation() == window.centralWidget().orientation()
+    assert work_splitter.orientation() == Qt.Orientation.Horizontal
     assert work_splitter.count() == 2
     assert work_splitter.widget(0).findChild(type(window.editor)) is window.editor
     assert work_splitter.widget(1).findChild(type(window.refdes_table)) is window.refdes_table
     assert window.status_log.parent() is not work_splitter.widget(0)
     assert window.status_log.parent() is not work_splitter.widget(1)
-    assert "Export RefDes Excel" in toolbar_actions
-    assert "Import RefDes Excel" in toolbar_actions
-    assert toolbar_actions.index("Import RefDes Excel") == toolbar_actions.index("Export RefDes Excel") + 1
+    menu_actions = window.menuBar().actions()
+    assert [action.text() for action in menu_actions] == ["File", "Edit", "Model", "Port", "View", "Help"]
+    assert [action.text() for action in menu_actions[0].menu().actions()] == [
+        "Load SPD", "Export New SPD", "", "Export RefDes Excel", "Import RefDes Excel", "", "Exit"
+    ]
+    assert [action.text() for action in menu_actions[2].menu().actions()] == ["Validate/Convert", "Revert"]
+    assert [action.text() for action in menu_actions[3].menu().actions()] == ["Generate Port", "Clear Pending Ports"]
+    window.resize(900, 600)
+    window.show()
+    app.processEvents()
+    window.port_workspace_action.trigger()
+    assert window.workspace_tabs.currentIndex() == 1
+    assert window.port_workspace_action.isChecked() and not window.model_workspace_action.isChecked()
+    assert window.status_log.isVisible()
+    window.port_workspace_action.trigger()
+    assert window.port_workspace_action.isChecked()
+    window.model_workspace_action.trigger()
+    assert window.workspace_tabs.currentIndex() == 0
+    assert window.model_workspace_action.isChecked() and not window.port_workspace_action.isChecked()
 
 
 def test_refdes_menu_and_drop_share_auto_detection_and_help_action(monkeypatch, tmp_path: Path) -> None:
@@ -1015,8 +1033,10 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
         activation_status="Automatic",
         net_name="VDD",
         unique_net_names=("DGND", "VDD"),
+        package_node_count=2,
+        annotated_node_count=2,
     )
-    record2 = RefDesRecord("CAP", "C2", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"))
+    record2 = RefDesRecord("CAP", "C2", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"), package_node_count=2, annotated_node_count=2)
     window.spd_path = source
     window.inventory = SpdInventory(
         [], [record, record2], ground_nets=("DGND",), net_names=("DGND", "VDD"), existing_port_keys=(), port_insertion_offset=1,
@@ -1027,10 +1047,17 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     window._set_net_selectors(("DGND", "VDD"), ("DGND", "VDD"), ("DGND",))
     window._populate_refdes_table("CAP")
     window.refdes_table.selectRow(0)
-    window.refdes_table.selectionModel().select(
-        window.refdes_table.model().index(1, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
-    )
     window.target_net_selector.setCurrentText("VDD")
+
+    assert window.port_refdes_table.rowCount() == 2
+    assert window.selected_refdes_names() == ["C1"]
+    assert not window._selected_port_refdes_names()
+    assert not window.generate_port_action.isEnabled()
+    assert not window.port_export_button.isEnabled()
+    window.port_refdes_table.selectRow(0)
+    window.port_refdes_table.selectionModel().select(
+        window.port_refdes_table.model().index(1, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    )
 
     assert window.generate_port_action.isEnabled()
     window.reference_net_selector.setCurrentText("VDD")
@@ -1043,6 +1070,7 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     window._update_generate_port_state()
     assert not window.generate_port_action.isEnabled()
     window.inventory = SpdInventory([], [record, record2], ground_nets=("DGND",), net_names=("DGND", "VDD"), port_insertion_offset=1)
+    window.port_refdes_table.selectAll()
     window._update_generate_port_state()
     assert window.generate_port_action.isEnabled()
     monkeypatch.setattr("spd_model_injector.ui.main_window.validate_port_requests", lambda *args, **kwargs: [])
@@ -1052,6 +1080,9 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
         PortRequest(instance="C2", target_net="VDD", reference_net="DGND"),
     ]
     assert "Queued 2 Port request" in window.status_log.toPlainText()
+    assert not window._selected_port_refdes_names()
+    assert window.port_clear_button.isEnabled()
+    assert window.port_export_button.isEnabled()
 
     captured: dict[str, object] = {}
     monkeypatch.setattr("spd_model_injector.ui.workers.write_spd_with_replacements", lambda *args, **kwargs: captured.update(kwargs))
@@ -1061,3 +1092,43 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     worker.run()
     assert captured["port_requests"] == window.pending_port_requests
     assert captured["inventory"] is window.inventory
+
+    window.clear_pending_ports()
+    assert not window.pending_port_requests
+    assert not window.port_clear_button.isEnabled()
+    assert not window.port_export_button.isEnabled()
+    assert "Cleared 2 pending Port request" in window.status_log.toPlainText()
+
+
+def test_port_filter_clears_hidden_selection_and_readiness_distinguishes_busy_and_unsafe(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    source = tmp_path / "board.spd"
+    source.write_text("source\n", encoding="utf-8")
+    eligible = RefDesRecord(
+        "CAP", "C1", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"), package_node_count=2, annotated_node_count=2
+    )
+    ineligible = RefDesRecord(
+        "CAP", "C3", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"), package_node_count=3, annotated_node_count=3
+    )
+    window.spd_path = source
+    window.refdes_records = [eligible, ineligible]
+    window.inventory = SpdInventory([], [eligible, ineligible], port_insertion_offset=1)
+    window._set_net_selectors(("VDD",), ("DGND", "VDD"), ("DGND",))
+    window.target_net_selector.setCurrentText("VDD")
+
+    assert window.port_refdes_table.rowCount() == 1
+    assert window.port_candidate_label.text().endswith(": 1")
+    window.port_refdes_table.selectRow(0)
+    assert window.generate_port_action.isEnabled()
+    window.port_refdes_filter.setText("does-not-match")
+    assert window.port_refdes_table.isRowHidden(0)
+    assert not window._selected_port_refdes_names()
+    assert not window.generate_port_action.isEnabled()
+
+    window._set_busy(True)
+    assert window.port_readiness_banner.text().startswith("Busy:")
+    window._set_busy(False)
+    window.inventory = SpdInventory([], [eligible, ineligible])
+    window._update_generate_port_state()
+    assert "no safe .Port/.EndPort section" in window.port_readiness_banner.text()
