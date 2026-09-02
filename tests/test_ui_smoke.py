@@ -9,7 +9,7 @@ from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QMessageBox, QPlainTextEdit, QSplitter, QTabWidget
 
 from spd_model_injector import __version__
-from spd_model_injector.core.spd import PartialCktBlock, RefDesRecord, SpdInventory
+from spd_model_injector.core.spd import PartialCktBlock, PortRecord, RefDesRecord, SpdInventory
 from spd_model_injector.core.spd import PortRequest
 from spd_model_injector.ui.main_window import MainWindow
 from spd_model_injector.ui.workers import ExportWorker
@@ -59,6 +59,7 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     window = MainWindow()
     root = window.centralWidget()
     work_splitter = window.findChild(QSplitter, "work_splitter")
+    port_splitter = window.findChild(QSplitter, "port_splitter")
 
     tabs = window.workspace_tabs
     assert root is not tabs
@@ -68,6 +69,9 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert work_splitter is not None
     assert work_splitter.orientation() == Qt.Orientation.Horizontal
     assert work_splitter.count() == 2
+    assert port_splitter is not None
+    assert port_splitter.orientation() == Qt.Orientation.Vertical
+    assert port_splitter.count() == 2
     assert work_splitter.widget(0).findChild(type(window.editor)) is window.editor
     assert work_splitter.widget(1).findChild(type(window.refdes_table)) is window.refdes_table
     assert window.status_log.parent() is not work_splitter.widget(0)
@@ -1087,10 +1091,13 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     captured: dict[str, object] = {}
     monkeypatch.setattr("spd_model_injector.ui.workers.write_spd_with_replacements", lambda *args, **kwargs: captured.update(kwargs))
     worker = ExportWorker(
-        source, tmp_path / "out.spd", window.blocks, {}, port_requests=window.pending_port_requests, inventory=window.inventory
+        source, tmp_path / "out.spd", window.blocks, {}, port_requests=window.pending_port_requests,
+        port_deletions=["Port1_OLD::VDD"], port_enabled_changes={"Port2_OLD::VDD": False}, inventory=window.inventory
     )
     worker.run()
     assert captured["port_requests"] == window.pending_port_requests
+    assert captured["port_deletions"] == ["Port1_OLD::VDD"]
+    assert captured["port_enabled_changes"] == {"Port2_OLD::VDD": False}
     assert captured["inventory"] is window.inventory
 
     window.clear_pending_ports()
@@ -1098,6 +1105,38 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     assert not window.port_clear_button.isEnabled()
     assert not window.port_export_button.isEnabled()
     assert "Cleared 2 pending Port request" in window.status_log.toPlainText()
+
+
+def test_existing_port_table_queues_activation_delete_and_restore(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    source = tmp_path / "board.spd"
+    source.write_text("source\n", encoding="utf-8")
+    port = PortRecord(
+        name="Port7_U1::VDD", number=7, instance="U1", target_net="VDD", component_name="DUT",
+        enabled=False, positive_node_count=12, negative_node_count=8,
+        header_start_offset=10, header_end_offset=40, record_end_offset=100,
+        header_line="Port7_U1::VDD Disabled Auto\n",
+    )
+    window.spd_path = source
+    window.inventory = SpdInventory([], [], port_records=(port,), port_insertion_offset=100)
+    window._populate_port_management_table()
+
+    assert window.port_management_table.rowCount() == 1
+    assert window.port_management_table.item(0, 0).checkState() == Qt.CheckState.Unchecked
+    assert window.port_management_table.item(0, 4).text() == "12"
+    window.port_management_table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    assert window.port_enabled_changes == {port.name: True}
+    assert window.port_export_button.isEnabled()
+
+    window.port_management_table.selectRow(0)
+    window.delete_or_restore_selected_ports()
+    assert window.port_deletions == {port.name}
+    assert not window.port_enabled_changes
+    assert window.port_management_table.item(0, 6).text() == "Delete queued"
+    window.port_management_table.selectRow(0)
+    window.delete_or_restore_selected_ports()
+    assert not window.port_deletions
 
 
 def test_port_filter_clears_hidden_selection_and_readiness_distinguishes_busy_and_unsafe(tmp_path: Path) -> None:

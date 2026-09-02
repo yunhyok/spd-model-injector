@@ -40,6 +40,8 @@ class ExportWorker(QObject):
         component_renames: dict[str, str] | None = None,
         component_clones: dict[str, str] | None = None,
         port_requests: list[PortRequest] | None = None,
+        port_deletions: list[str] | None = None,
+        port_enabled_changes: dict[str, bool] | None = None,
         inventory: SpdInventory | None = None,
     ) -> None:
         super().__init__()
@@ -53,6 +55,8 @@ class ExportWorker(QObject):
         self.component_renames = component_renames or {}
         self.component_clones = component_clones or {}
         self.port_requests = list(port_requests or [])
+        self.port_deletions = list(port_deletions or [])
+        self.port_enabled_changes = dict(port_enabled_changes or {})
         self.inventory = inventory
 
     @Slot()
@@ -69,6 +73,8 @@ class ExportWorker(QObject):
                 component_renames=self.component_renames,
                 component_clones=self.component_clones,
                 port_requests=self.port_requests,
+                port_deletions=self.port_deletions,
+                port_enabled_changes=self.port_enabled_changes,
                 inventory=self.inventory,
             )
             self.finished.emit(str(self.output_path))

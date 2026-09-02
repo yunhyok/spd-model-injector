@@ -188,6 +188,9 @@ class MainWindow(QMainWindow):
         self.component_renames: dict[str, str] = {}
         self.component_clones: dict[str, str] = {}
         self.pending_port_requests: list[PortRequest] = []
+        self.port_deletions: set[str] = set()
+        self.port_enabled_changes: dict[str, bool] = {}
+        self._updating_port_management_table = False
         self._loading_editor = False
         self._busy = False
         self._scan_thread: QThread | None = None
@@ -250,11 +253,23 @@ class MainWindow(QMainWindow):
         banner_font.setBold(True)
         self.port_readiness_banner.setFont(banner_font)
         self.port_candidate_label = QLabel("2. Eligible component instances (matching pins are merged): 0")
-        self.pending_ports_label = QLabel("3. Pending Port requests: 0")
-        self.pending_ports_list = QPlainTextEdit()
-        self.pending_ports_list.setReadOnly(True)
-        self.pending_ports_list.setMaximumBlockCount(100)
-        self.pending_ports_list.setFixedHeight(70)
+        self.pending_ports_label = QLabel("Existing and pending Ports: 0")
+        self.port_management_table = QTableWidget(0, 7)
+        self.port_management_table.setObjectName("port_management_table")
+        self.port_management_table.setHorizontalHeaderLabels(
+            ["Active", "Port", "Instance", "Target NET", "+ Pins", "- Pins", "Source"]
+        )
+        self.port_management_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.port_management_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.port_management_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.port_management_table.setAlternatingRowColors(True)
+        self.port_management_table.itemChanged.connect(self._port_management_item_changed)
+        self.port_management_table.itemSelectionChanged.connect(self._update_port_delete_state)
+        self.port_management_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.port_management_table.horizontalHeader().resizeSection(0, 60)
+        self.port_management_table.horizontalHeader().resizeSection(1, 280)
+        self.port_management_table.horizontalHeader().resizeSection(2, 140)
+        self.port_management_table.horizontalHeader().resizeSection(3, 160)
         self.refdes_table = DropRefDesTable(0, 2)
         self.refdes_table.setHorizontalHeaderLabels(["RefDes Name", "Activation Status"])
         self.refdes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -421,9 +436,13 @@ class MainWindow(QMainWindow):
 
         port_root = QWidget()
         port_layout = QVBoxLayout(port_root)
-        port_layout.addWidget(QLabel("Port Generation Workflow"))
-        port_layout.addWidget(self.port_readiness_banner)
-        port_layout.addWidget(QLabel("1. Select an exact NET pair"))
+        port_splitter = QSplitter(Qt.Orientation.Vertical)
+        port_splitter.setObjectName("port_splitter")
+        generation_panel = QWidget()
+        generation_layout = QVBoxLayout(generation_panel)
+        generation_layout.addWidget(QLabel("Port Generation"))
+        generation_layout.addWidget(self.port_readiness_banner)
+        generation_layout.addWidget(QLabel("1. Select an exact NET pair"))
         net_row = QHBoxLayout()
         target_box = QVBoxLayout()
         target_box.addWidget(QLabel("Target Power NET"))
@@ -433,27 +452,44 @@ class MainWindow(QMainWindow):
         reference_box.addWidget(self.reference_net_selector)
         net_row.addLayout(target_box)
         net_row.addLayout(reference_box)
-        port_layout.addLayout(net_row)
-        port_layout.addWidget(self.port_candidate_label)
-        port_layout.addWidget(self.port_refdes_filter)
-        port_layout.addWidget(self.port_refdes_table, 1)
-        port_layout.addWidget(self.pending_ports_label)
-        port_layout.addWidget(self.pending_ports_list)
-        port_buttons = QHBoxLayout()
+        generation_layout.addLayout(net_row)
+        generation_layout.addWidget(self.port_candidate_label)
+        generation_layout.addWidget(self.port_refdes_filter)
+        generation_layout.addWidget(self.port_refdes_table, 1)
+        generation_buttons = QHBoxLayout()
         self.port_generate_button = QPushButton("Generate Port")
         self.port_generate_button.setEnabled(False)
         self.port_generate_button.clicked.connect(self.generate_ports)
+        generation_buttons.addWidget(self.port_generate_button)
+        generation_buttons.addStretch(1)
+        generation_layout.addLayout(generation_buttons)
+        port_splitter.addWidget(generation_panel)
+
+        management_panel = QWidget()
+        management_layout = QVBoxLayout(management_panel)
+        management_layout.addWidget(QLabel("Existing and Pending Port Management"))
+        management_layout.addWidget(self.pending_ports_label)
+        management_layout.addWidget(self.port_management_table, 1)
+        port_buttons = QHBoxLayout()
+        self.port_delete_button = QPushButton("Delete / Restore Selected")
+        self.port_delete_button.setEnabled(False)
+        self.port_delete_button.clicked.connect(self.delete_or_restore_selected_ports)
         self.port_clear_button = QPushButton("Clear Pending")
         self.port_clear_button.setEnabled(False)
         self.port_clear_button.clicked.connect(self.clear_pending_ports)
         self.port_export_button = QPushButton("Export New SPD")
         self.port_export_button.setEnabled(False)
         self.port_export_button.clicked.connect(self.export_spd_dialog)
-        port_buttons.addWidget(self.port_generate_button)
+        port_buttons.addWidget(self.port_delete_button)
         port_buttons.addWidget(self.port_clear_button)
         port_buttons.addWidget(self.port_export_button)
         port_buttons.addStretch(1)
-        port_layout.addLayout(port_buttons)
+        management_layout.addLayout(port_buttons)
+        port_splitter.addWidget(management_panel)
+        port_splitter.setSizes([360, 360])
+        port_splitter.setStretchFactor(0, 1)
+        port_splitter.setStretchFactor(1, 1)
+        port_layout.addWidget(port_splitter, 1)
 
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.setTabPosition(QTabWidget.TabPosition.East)
@@ -542,6 +578,102 @@ class MainWindow(QMainWindow):
                 names.append(str(item.data(Qt.ItemDataRole.UserRole) or item.text()))
         return names
 
+    def _populate_port_management_table(self) -> None:
+        self._updating_port_management_table = True
+        self.port_management_table.setRowCount(0)
+        refdes = {record.refdes_name: record for record in self.effective_refdes_records()}
+        rows: list[tuple[tuple[str, object], bool, list[str]]] = []
+        for record in self.inventory.port_records:
+            deleted = record.name in self.port_deletions
+            rows.append((
+                ("existing", record.name),
+                self.port_enabled_changes.get(record.name, record.enabled),
+                [record.name, record.instance, record.target_net, str(record.positive_node_count),
+                 str(record.negative_node_count), "Delete queued" if deleted else "Existing"],
+            ))
+        for index, request in enumerate(self.pending_port_requests):
+            record = refdes.get(request.instance)
+            rows.append((
+                ("pending", index),
+                request.enabled,
+                [f"(new) {request.instance}::{request.target_net}", request.instance, request.target_net,
+                 str(record.node_count_for_net(request.target_net) if record else 0),
+                 str(record.node_count_for_net(request.reference_net) if record else 0), "Pending"],
+            ))
+        self.port_management_table.setRowCount(len(rows))
+        for row, (identity, enabled, values) in enumerate(rows):
+            active = QTableWidgetItem()
+            active.setData(Qt.ItemDataRole.UserRole, identity)
+            active.setFlags(active.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            active.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+            if identity[0] == "existing" and identity[1] in self.port_deletions:
+                active.setFlags(active.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            self.port_management_table.setItem(row, 0, active)
+            for column, value in enumerate(values, start=1):
+                self.port_management_table.setItem(row, column, QTableWidgetItem(value))
+        self._updating_port_management_table = False
+        existing_count = len(self.inventory.port_records)
+        self.pending_ports_label.setText(
+            f"{existing_count} existing, {len(self.pending_port_requests)} pending, "
+            f"{len(self.port_deletions)} delete queued"
+        )
+        self._update_port_delete_state()
+
+    def _port_management_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating_port_management_table or item.column() != 0:
+            return
+        identity = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(identity, tuple) or len(identity) != 2:
+            return
+        enabled = item.checkState() == Qt.CheckState.Checked
+        kind, key = identity
+        if kind == "existing":
+            record = next((record for record in self.inventory.port_records if record.name == key), None)
+            if record is None or key in self.port_deletions:
+                return
+            if enabled == record.enabled:
+                self.port_enabled_changes.pop(str(key), None)
+            else:
+                self.port_enabled_changes[str(key)] = enabled
+            self._append_status(f"Queued {key} activation: {'Enabled' if enabled else 'Disabled'}.")
+        elif kind == "pending" and isinstance(key, int) and 0 <= key < len(self.pending_port_requests):
+            self.pending_port_requests[key] = replace(self.pending_port_requests[key], enabled=enabled)
+        self._update_generate_port_state()
+
+    def _update_port_delete_state(self) -> None:
+        if hasattr(self, "port_delete_button"):
+            self.port_delete_button.setEnabled(
+                not self._busy and bool(self.port_management_table.selectionModel().selectedRows())
+            )
+
+    def delete_or_restore_selected_ports(self) -> None:
+        identities = []
+        for index in self.port_management_table.selectionModel().selectedRows(0):
+            item = self.port_management_table.item(index.row(), 0)
+            identity = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if isinstance(identity, tuple) and len(identity) == 2:
+                identities.append(identity)
+        pending = sorted((key for kind, key in identities if kind == "pending" and isinstance(key, int)), reverse=True)
+        for index in pending:
+            if 0 <= index < len(self.pending_port_requests):
+                del self.pending_port_requests[index]
+        for kind, name in identities:
+            if kind != "existing":
+                continue
+            name = str(name)
+            if name in self.port_deletions:
+                self.port_deletions.remove(name)
+            else:
+                self.port_deletions.add(name)
+                self.port_enabled_changes.pop(name, None)
+        if identities:
+            self._append_status(f"Updated {len(identities)} Port deletion selection(s).")
+        self._populate_port_management_table()
+        self._update_generate_port_state()
+
+    def _has_port_changes(self) -> bool:
+        return bool(self.pending_port_requests or self.port_deletions or self.port_enabled_changes)
+
     def _update_port_readiness(self) -> None:
         if self.spd_path is None:
             message = "Load an SPD file to check Port generation readiness."
@@ -560,14 +692,13 @@ class MainWindow(QMainWindow):
         else:
             message = "Ready to queue PowerSI Ports."
         self.port_readiness_banner.setText(message)
-        self.pending_ports_label.setText(f"3. Pending Port requests: {len(self.pending_port_requests)}")
-        self.pending_ports_list.setPlainText("\n".join(f"{request.instance} → {request.target_net} / {request.reference_net}" for request in self.pending_port_requests))
 
     def clear_pending_ports(self) -> None:
         count = len(self.pending_port_requests)
         self.pending_port_requests.clear()
         if count:
             self._append_status(f"Cleared {count} pending Port request(s).")
+        self._populate_port_management_table()
         self._update_port_readiness()
         self._update_generate_port_state()
 
@@ -608,8 +739,11 @@ class MainWindow(QMainWindow):
         self.component_renames.clear()
         self.component_clones.clear()
         self.pending_port_requests.clear()
+        self.port_deletions.clear()
+        self.port_enabled_changes.clear()
         self._set_net_selectors((), ())
         self._populate_port_refdes_table()
+        self._populate_port_management_table()
         self.component_list.clear()
         if self.component_filter.text():
             self.component_filter.blockSignals(True)
@@ -673,6 +807,7 @@ class MainWindow(QMainWindow):
         self.component_clones.clear()
         self.populate_components()
         self._populate_port_refdes_table()
+        self._populate_port_management_table()
         net_names = self._inventory_net_names(inventory)
         self._set_net_selectors(self._inventory_power_nets(inventory), net_names, self._inventory_ground_nets(inventory))
         self._update_undo_component_change_action()
@@ -706,7 +841,10 @@ class MainWindow(QMainWindow):
         self.component_renames.clear()
         self.component_clones.clear()
         self.pending_port_requests.clear()
+        self.port_deletions.clear()
+        self.port_enabled_changes.clear()
         self._set_net_selectors((), ())
+        self._populate_port_management_table()
         self.component_list.clear()
         self._update_component_header()
         self._update_undo_component_change_action()
@@ -818,7 +956,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self.pending_port_requests:
+        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self._has_port_changes():
             confirm = QMessageBox.question(
                 self,
                 "Export",
@@ -907,6 +1045,8 @@ class MainWindow(QMainWindow):
             dict(self.component_renames),
             dict(self.component_clones),
             port_requests=list(self.pending_port_requests),
+            port_deletions=sorted(self.port_deletions),
+            port_enabled_changes=dict(self.port_enabled_changes),
             inventory=self.inventory,
         )
         self._export_worker.moveToThread(self._export_thread)
@@ -921,6 +1061,9 @@ class MainWindow(QMainWindow):
 
     def _export_finished(self, output_path: str) -> None:
         self.pending_port_requests.clear()
+        self.port_deletions.clear()
+        self.port_enabled_changes.clear()
+        self._populate_port_management_table()
         self.progress.setVisible(False)
         self._set_busy(False)
         message = f"Exported to {output_path}"
@@ -1087,7 +1230,8 @@ class MainWindow(QMainWindow):
             self.port_generate_button.setEnabled(action.isEnabled())
             has_pending = bool(self.pending_port_requests)
             self.port_clear_button.setEnabled(not self._busy and has_pending)
-            self.port_export_button.setEnabled(not self._busy and has_pending)
+            self.port_export_button.setEnabled(not self._busy and self._has_port_changes())
+            self._update_port_delete_state()
         if self.clear_pending_ports_action is not None:
             self.clear_pending_ports_action.setEnabled(not self._busy and bool(self.pending_port_requests))
         if hasattr(self, "port_readiness_banner"):
@@ -1124,6 +1268,7 @@ class MainWindow(QMainWindow):
         self.pending_port_requests.extend(requests)
         self.port_refdes_table.clearSelection()
         self._append_status(f"Queued {len(requests)} Port request(s): {', '.join(r.instance for r in requests)}")
+        self._populate_port_management_table()
         self._update_port_readiness()
         self._update_generate_port_state()
 

@@ -479,6 +479,49 @@ def test_generate_port_resolves_selected_connect_and_inserts_before_endport(tmp_
     assert text.count(".EndPort") == 1
 
 
+def test_existing_ports_can_be_inspected_disabled_enabled_and_deleted(tmp_path: Path) -> None:
+    source = tmp_path / "manage-ports.spd"
+    output = tmp_path / "manage-ports-out.spd"
+    source.write_text(
+        ".Connect U3 DUT Checked = 1\n"
+        "A1 $Package.Node5!!A1::VDD\nG1 $Package.Node6!!G1::DGND\n.EndC\n"
+        ".Port\n"
+        "Port1_U1::VDD Auto GenFromCktInstance=\"U1\" GenFromCktModel=\"DUT\"\n"
+        "+ PositiveTerminal $Package.Node1!!A1::VDD $Package.Node2!!A2::VDD\n"
+        "+ NegativeTerminal $Package.Node3!!G1::DGND\n"
+        "Port2_U2::VDD Disabled Auto GenFromCktInstance=\"U2\" GenFromCktModel=\"LGA\"\n"
+        "+ PositiveTerminal $Package.Node4!!A1::VDD\n"
+        "+ NegativeTerminal $Package.Node7!!G1::DGND $Package.Node8!!G2::DGND\n"
+        ".EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+
+    assert [(port.name, port.enabled, port.positive_node_count, port.negative_node_count)
+            for port in inventory.port_records] == [
+        ("Port1_U1::VDD", True, 2, 1),
+        ("Port2_U2::VDD", False, 1, 2),
+    ]
+    write_spd_with_replacements(
+        source,
+        output,
+        inventory.blocks,
+        {},
+        refdes_records=inventory.refdes_records,
+        port_requests=[PortRequest("U3", "VDD", "DGND", enabled=False)],
+        port_deletions=["Port1_U1::VDD"],
+        port_enabled_changes={"Port2_U2::VDD": True},
+        inventory=inventory,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "Port1_U1::VDD" not in text
+    assert "Port2_U2::VDD Auto" in text and "Port2_U2::VDD Disabled" not in text
+    assert "Port3_U3_A1::VDD Disabled Auto" in text
+    assert text.count(".EndPort") == 1
+
+
 def test_generate_port_merges_all_matching_dut_pins(tmp_path: Path) -> None:
     source = tmp_path / "dut.spd"
     output = tmp_path / "dut-out.spd"

@@ -31,6 +31,7 @@ class PortRequest:
     instance: str
     target_net: str
     reference_net: str
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,22 @@ class RefDesRecord:
 
 
 @dataclass(frozen=True)
+class PortRecord:
+    name: str
+    number: int
+    instance: str
+    target_net: str
+    component_name: str
+    enabled: bool
+    positive_node_count: int
+    negative_node_count: int
+    header_start_offset: int
+    header_end_offset: int
+    record_end_offset: int
+    header_line: str
+
+
+@dataclass(frozen=True)
 class SpdInventory:
     blocks: list[PartialCktBlock]
     refdes_records: list[RefDesRecord]
@@ -93,6 +110,7 @@ class SpdInventory:
     port_section_end_offset: int | None = None
     port_insertion_offset: int | None = None
     existing_port_keys: tuple[tuple[str, str], ...] = ()
+    port_records: tuple[PortRecord, ...] = ()
     max_port_number: int = 0
     ground_nets: tuple[str, ...] = ()
     net_names: tuple[str, ...] = ()
@@ -310,11 +328,7 @@ def validate_port_requests(
     """Validate and resolve requests without touching the output file."""
     inv = inventory or scan_spd_inventory(source_path)
     if revalidate_metadata:
-        fresh_port_meta = _scan_port_and_netlist(Path(source_path), inv.blocks)
-        for name in ("port_section_start_offset", "port_section_end_offset", "port_insertion_offset",
-                     "existing_port_keys", "max_port_number", "ground_nets", "net_names", "power_nets"):
-            if getattr(inv, name) != fresh_port_meta[name]:
-                raise ValueError("SPD metadata changed since scan; reload before generating Ports.")
+        _validate_port_metadata(Path(source_path), inv)
     records = {record.refdes_name: record for record in (refdes_records or inv.refdes_records)}
     existing = set(inv.existing_port_keys)
     seen: set[tuple[str, str]] = set()
@@ -377,7 +391,7 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
     if path.stat().st_size == 0:
         return {"port_section_start_offset": None, "port_section_end_offset": None,
                 "port_insertion_offset": None, "existing_port_keys": (), "max_port_number": 0,
-                "ground_nets": (), "net_names": (), "power_nets": ()}
+                "port_records": (), "ground_nets": (), "net_names": (), "power_nets": ()}
     def marker_offsets(data: mmap.mmap, marker: bytes) -> list[int]:
         found: list[int] = []
         pos = 0
@@ -401,31 +415,64 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
         line_end = data.find(b"\n", end_marker) if end_marker is not None else -1
         end = (len(data) if line_end < 0 else line_end + 1) if end_marker is not None else None
         keys: list[tuple[str, str]] = []
+        port_records: list[PortRecord] = []
         max_number = 0
         if not invalid:
-            section = _normalize_newlines(bytes(data[start:end]).decode("utf-8", errors="replace"))
-            active_instance: str | None = None
-            positive = False
-            for line in section.splitlines():
-                match = re.match(r"^Port(\d+)_([^:]+)::(\S+)(?:\s|$)", line, re.IGNORECASE)
+            port_line_end = data.find(b"\n", start)
+            cursor = end_marker if port_line_end < 0 else port_line_end + 1
+            headers: list[tuple[int, int, str, re.Match[str]]] = []
+            while cursor < end_marker:
+                next_line = data.find(b"\n", cursor, end_marker)
+                line_end = end_marker if next_line < 0 else next_line + 1
+                line = _strip_newline(bytes(data[cursor:line_end]).decode("utf-8", errors="replace"))
+                match = re.match(r"^(Port(\d+)\S*)(?:\s|$)", line, re.IGNORECASE)
                 if match:
-                    max_number = max(max_number, int(match.group(1)))
-                    attr = re.search(r'GenFromCktInstance\s*=\s*"([^"]+)"', line, re.IGNORECASE)
-                    active_instance = attr.group(1) if attr else match.group(2)
-                    positive = False
-                    continue
-                match = re.search(r"\bPositiveTerminal\s+(.+)$", line, re.IGNORECASE)
-                if match and active_instance:
-                    positive = True
-                    tokens = match.group(1)
-                elif positive and active_instance and not re.search(r"\bNegativeTerminal\b", line, re.IGNORECASE):
-                    tokens = line
-                else:
-                    positive = False if re.search(r"\bNegativeTerminal\b", line, re.IGNORECASE) else positive
-                    continue
-                for token in re.findall(r"\$Package\.Node\S+", tokens, re.IGNORECASE):
-                    if "::" in token:
-                        keys.append((active_instance, token.split("::", 1)[1]))
+                    headers.append((cursor, line_end, line, match))
+                cursor = line_end
+            for index, (header_start, header_end, header, match) in enumerate(headers):
+                record_end = headers[index + 1][0] if index + 1 < len(headers) else end_marker
+                body = _normalize_newlines(bytes(data[header_end:record_end]).decode("utf-8", errors="replace"))
+                terminal: str | None = None
+                positive_tokens: list[str] = []
+                negative_tokens: list[str] = []
+                for line in body.splitlines():
+                    if re.search(r"\bPositiveTerminal\b", line, re.IGNORECASE):
+                        terminal = "positive"
+                    elif re.search(r"\bNegativeTerminal\b", line, re.IGNORECASE):
+                        terminal = "negative"
+                    elif not line.lstrip().startswith("+"):
+                        terminal = None
+                    tokens = re.findall(r"\$Package\.Node\S+", line, re.IGNORECASE)
+                    if terminal == "positive":
+                        positive_tokens.extend(tokens)
+                    elif terminal == "negative":
+                        negative_tokens.extend(tokens)
+                name = match.group(1)
+                number = int(match.group(2))
+                max_number = max(max_number, number)
+                instance_attr = re.search(r'GenFromCktInstance\s*=\s*"([^"]+)"', header, re.IGNORECASE)
+                component_attr = re.search(r'GenFromCktModel\s*=\s*"([^"]+)"', header, re.IGNORECASE)
+                fallback = name.split("_", 1)[1].split("::", 1)[0] if "_" in name else ""
+                instance = instance_attr.group(1) if instance_attr else fallback
+                positive_nets = tuple(dict.fromkeys(
+                    token.split("::", 1)[1] for token in positive_tokens if "::" in token
+                ))
+                target_net = positive_nets[0] if positive_nets else (name.rsplit("::", 1)[1] if "::" in name else "")
+                keys.extend((instance, net) for net in positive_nets or ((target_net,) if target_net else ()))
+                port_records.append(PortRecord(
+                    name=name,
+                    number=number,
+                    instance=instance,
+                    target_net=target_net,
+                    component_name=component_attr.group(1) if component_attr else "",
+                    enabled=re.search(r"\bDisabled\b", header, re.IGNORECASE) is None,
+                    positive_node_count=len(positive_tokens),
+                    negative_node_count=len(negative_tokens),
+                    header_start_offset=header_start,
+                    header_end_offset=header_end,
+                    record_end_offset=record_end,
+                    header_line=header + "\n",
+                ))
 
         nets = marker_offsets(data, b".NetList")
         end_nets = marker_offsets(data, b".EndNetList")
@@ -452,8 +499,25 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
     return {"port_section_start_offset": start, "port_section_end_offset": end,
             "port_insertion_offset": None if invalid else end_marker,
             "existing_port_keys": tuple(dict.fromkeys(keys)), "max_port_number": max_number,
+            "port_records": tuple(port_records),
             "ground_nets": tuple(ground_nets), "net_names": tuple(net_names),
             "power_nets": tuple(power_nets)}
+
+
+def _validate_port_metadata(path: Path, inventory: SpdInventory) -> None:
+    fresh = _scan_port_and_netlist(path, inventory.blocks)
+    for name in ("port_section_start_offset", "port_section_end_offset", "port_insertion_offset",
+                 "existing_port_keys", "port_records", "max_port_number", "ground_nets", "net_names", "power_nets"):
+        if getattr(inventory, name) != fresh[name]:
+            raise ValueError("SPD metadata changed since scan; reload before changing Ports.")
+
+
+def _replace_port_enabled(header: str, enabled: bool) -> str:
+    if enabled:
+        return re.sub(r"\s+Disabled(?=\s|$)", "", header, count=1, flags=re.IGNORECASE)
+    if re.search(r"\bDisabled\b", header, re.IGNORECASE):
+        return header
+    return re.sub(r"^(\S+)", r"\1 Disabled", header, count=1)
 
 
 def read_block_body(path: str | Path, block: PartialCktBlock) -> str:
@@ -475,6 +539,8 @@ def write_spd_with_replacements(
     component_renames: Mapping[str, str] | None = None,
     component_clones: Mapping[str, str] | None = None,
     port_requests: Sequence[PortRequest] | None = None,
+    port_deletions: Sequence[str] | None = None,
+    port_enabled_changes: Mapping[str, bool] | None = None,
     inventory: SpdInventory | None = None,
 ) -> None:
     """Write a new SPD, replacing selected bodies and component identities."""
@@ -582,9 +648,35 @@ def write_spd_with_replacements(
                 record.connect_line_end_offset,
             )
 
+    deletion_names = tuple(dict.fromkeys(port_deletions or ()))
+    enabled_changes = dict(port_enabled_changes or {})
+    inv = inventory or (scan_spd_inventory(source) if port_requests or deletion_names or enabled_changes else None)
+    if inv is not None:
+        _validate_port_metadata(source, inv)
+        records = {record.name: record for record in inv.port_records}
+        unknown = (set(deletion_names) | set(enabled_changes)) - set(records)
+        if unknown:
+            raise ValueError(f"Unknown Port: {', '.join(sorted(unknown))}")
+        overlap = set(deletion_names) & set(enabled_changes)
+        if overlap:
+            raise ValueError(f"Cannot delete and change activation for the same Port: {', '.join(sorted(overlap))}")
+        if any(type(enabled) is not bool for enabled in enabled_changes.values()):
+            raise ValueError("Port activation values must be boolean.")
+        for name in deletion_names:
+            record = records[name]
+            replacement_by_offset[record.header_start_offset] = ("", record.record_end_offset)
+        for name, enabled in enabled_changes.items():
+            record = records[name]
+            replacement_by_offset[record.header_start_offset] = (
+                _replace_port_enabled(record.header_line, enabled),
+                record.header_end_offset,
+            )
+
     if port_requests:
-        inv = inventory or scan_spd_inventory(source)
-        resolved = validate_port_requests(source, port_requests, refdes_records=refdes_records, inventory=inv)
+        assert inv is not None
+        resolved = validate_port_requests(
+            source, port_requests, refdes_records=refdes_records, inventory=inv, revalidate_metadata=False
+        )
         port_lines: list[str] = []
         for index, (request, record, target_tokens, reference_tokens) in enumerate(resolved, start=inv.max_port_number + 1):
             component = (refdes_component_changes or {}).get(
@@ -594,8 +686,9 @@ def write_spd_with_replacements(
             target_token = target_tokens[0]
             pin = target_token.split("!!", 1)[1].split("::", 1)[0] if len(target_tokens) == 1 and "!!" in target_token else ""
             suffix = f"_{pin}" if pin else ""
+            disabled = "" if request.enabled else " Disabled"
             port_lines.append(
-                f'Port{index}_{request.instance}{suffix}::{request.target_net} Auto GenFromCktInstance="{request.instance}" GenFromCktModel="{component}"\n'
+                f'Port{index}_{request.instance}{suffix}::{request.target_net}{disabled} Auto GenFromCktInstance="{request.instance}" GenFromCktModel="{component}"\n'
             )
             port_lines.extend(_format_port_terminal("PositiveTerminal", target_tokens))
             port_lines.extend(_format_port_terminal("NegativeTerminal", reference_tokens))
