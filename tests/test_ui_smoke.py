@@ -70,8 +70,9 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert work_splitter.orientation() == Qt.Orientation.Horizontal
     assert work_splitter.count() == 2
     assert port_splitter is not None
-    assert port_splitter.orientation() == Qt.Orientation.Vertical
+    assert port_splitter.orientation() == Qt.Orientation.Horizontal
     assert port_splitter.count() == 2
+    assert port_splitter.sizes()[0] >= port_splitter.sizes()[1]
     assert work_splitter.widget(0).findChild(type(window.editor)) is window.editor
     assert work_splitter.widget(1).findChild(type(window.refdes_table)) is window.refdes_table
     assert window.status_log.parent() is not work_splitter.widget(0)

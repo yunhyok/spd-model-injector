@@ -436,7 +436,7 @@ class MainWindow(QMainWindow):
 
         port_root = QWidget()
         port_layout = QVBoxLayout(port_root)
-        port_splitter = QSplitter(Qt.Orientation.Vertical)
+        port_splitter = QSplitter(Qt.Orientation.Horizontal)
         port_splitter.setObjectName("port_splitter")
         generation_panel = QWidget()
         generation_layout = QVBoxLayout(generation_panel)
@@ -486,7 +486,7 @@ class MainWindow(QMainWindow):
         port_buttons.addStretch(1)
         management_layout.addLayout(port_buttons)
         port_splitter.addWidget(management_panel)
-        port_splitter.setSizes([360, 360])
+        port_splitter.setSizes([550, 450])
         port_splitter.setStretchFactor(0, 1)
         port_splitter.setStretchFactor(1, 1)
         port_layout.addWidget(port_splitter, 1)
