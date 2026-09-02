@@ -1106,10 +1106,12 @@ def test_port_filter_clears_hidden_selection_and_readiness_distinguishes_busy_an
     source = tmp_path / "board.spd"
     source.write_text("source\n", encoding="utf-8")
     eligible = RefDesRecord(
-        "CAP", "C1", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"), package_node_count=2, annotated_node_count=2
+        "DUT", "U1", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"),
+        net_node_counts=(("DGND", 5), ("VDD", 3)), package_node_count=9, annotated_node_count=8,
     )
     ineligible = RefDesRecord(
-        "CAP", "C3", "Automatic", net_name="VDD", unique_net_names=("DGND", "VDD"), package_node_count=3, annotated_node_count=3
+        "DUT", "U2", "Automatic", net_name="VDD", unique_net_names=("VDD",),
+        net_node_counts=(("VDD", 3),), package_node_count=3, annotated_node_count=3,
     )
     window.spd_path = source
     window.refdes_records = [eligible, ineligible]
@@ -1119,6 +1121,8 @@ def test_port_filter_clears_hidden_selection_and_readiness_distinguishes_busy_an
 
     assert window.port_refdes_table.rowCount() == 1
     assert window.port_candidate_label.text().endswith(": 1")
+    assert window.port_refdes_table.item(0, 2).text() == "3"
+    assert window.port_refdes_table.item(0, 3).text() == "5"
     window.port_refdes_table.selectRow(0)
     assert window.generate_port_action.isEnabled()
     window.port_refdes_filter.setText("does-not-match")

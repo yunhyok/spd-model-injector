@@ -229,9 +229,9 @@ class MainWindow(QMainWindow):
         self.port_refdes_filter = QLineEdit()
         self.port_refdes_filter.setPlaceholderText("Search RefDes instances...")
         self.port_refdes_filter.textChanged.connect(self._apply_port_refdes_filter)
-        self.port_refdes_table = QTableWidget(0, 2)
+        self.port_refdes_table = QTableWidget(0, 4)
         self.port_refdes_table.setObjectName("port_refdes_table")
-        self.port_refdes_table.setHorizontalHeaderLabels(["RefDes Name", "Component"])
+        self.port_refdes_table.setHorizontalHeaderLabels(["RefDes Name", "Component", "Target Pins", "Reference Pins"])
         self.port_refdes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.port_refdes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.port_refdes_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -240,6 +240,8 @@ class MainWindow(QMainWindow):
         self.port_refdes_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.port_refdes_table.horizontalHeader().resizeSection(0, 180)
         self.port_refdes_table.horizontalHeader().resizeSection(1, 150)
+        self.port_refdes_table.horizontalHeader().resizeSection(2, 100)
+        self.port_refdes_table.horizontalHeader().resizeSection(3, 110)
         self.port_readiness_banner = QLabel("Load an SPD to check Port generation readiness.")
         self.port_readiness_banner.setWordWrap(True)
         self.port_readiness_banner.setFrameShape(QFrame.Shape.StyledPanel)
@@ -247,7 +249,7 @@ class MainWindow(QMainWindow):
         banner_font = self.port_readiness_banner.font()
         banner_font.setBold(True)
         self.port_readiness_banner.setFont(banner_font)
-        self.port_candidate_label = QLabel("2. Eligible two-terminal component instances: 0")
+        self.port_candidate_label = QLabel("2. Eligible component instances (matching pins are merged): 0")
         self.pending_ports_label = QLabel("3. Pending Port requests: 0")
         self.pending_ports_list = QPlainTextEdit()
         self.pending_ports_list.setReadOnly(True)
@@ -510,7 +512,7 @@ class MainWindow(QMainWindow):
 
     def _populate_port_refdes_table(self) -> None:
         self.port_refdes_table.setRowCount(0)
-        self.port_candidate_label.setText("2. Eligible two-terminal component instances: 0")
+        self.port_candidate_label.setText("2. Eligible component instances (matching pins are merged): 0")
         target = str(self.target_net_selector.currentData() or "")
         reference = str(self.reference_net_selector.currentData() or "")
         if not target or not reference or target == reference:
@@ -519,8 +521,7 @@ class MainWindow(QMainWindow):
         records = sorted(self.effective_refdes_records(), key=lambda record: record.refdes_name)
         records = [
             record for record in records
-            if record.package_node_count == record.annotated_node_count == 2
-            and target in record.unique_net_names and reference in record.unique_net_names
+            if target in record.unique_net_names and reference in record.unique_net_names
         ]
         self.port_refdes_table.setRowCount(len(records))
         for row, record in enumerate(records):
@@ -528,7 +529,9 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, record.refdes_name)
             self.port_refdes_table.setItem(row, 0, item)
             self.port_refdes_table.setItem(row, 1, QTableWidgetItem(record.component_name))
-        self.port_candidate_label.setText(f"2. Eligible two-terminal component instances: {len(records)}")
+            self.port_refdes_table.setItem(row, 2, QTableWidgetItem(str(record.node_count_for_net(target))))
+            self.port_refdes_table.setItem(row, 3, QTableWidgetItem(str(record.node_count_for_net(reference))))
+        self.port_candidate_label.setText(f"2. Eligible component instances (matching pins are merged): {len(records)}")
         self._apply_port_refdes_filter(self.port_refdes_filter.text())
 
     def _selected_port_refdes_names(self) -> list[str]:
@@ -551,7 +554,7 @@ class MainWindow(QMainWindow):
         elif self.target_net_selector.currentData() == self.reference_net_selector.currentData():
             message = "Target and Reference NET must be different."
         elif self.port_refdes_table.rowCount() == 0:
-            message = "No eligible two-terminal RefDes candidates match both selected NETs."
+            message = "No component instance has Package.Node pins on both selected NETs."
         elif not self._selected_port_refdes_names():
             message = f"{self.port_refdes_table.rowCount()} eligible candidates; select one or more component instances."
         else:
