@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.3.0",
+    [string]$Version = "0.4.0",
     [string]$Repo = "spd-model-injector"
 )
 
@@ -25,4 +25,4 @@ if (-not (Test-Path $installer)) {
     throw "Installer artifact not found: $installer. Run scripts/build.ps1 first."
 }
 
-gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Separated Model & RefDes and Port Generation into right-edge workspaces, organized commands under File/Edit/Model/Port/View/Help, and kept Port export fail-closed for unsafe or missing Port sections."
+gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Generate Port now supports DUT/LGA components by merging every Package.Node pin on each selected Power channel into one terminal. The left/right workspace supports multi-channel selection, automatic DGND reference, Component-to-RefDes candidate trees, existing/pending Port inspection, activation checkboxes, and queued deletion or restore controls."

@@ -464,6 +464,7 @@ def test_generate_port_resolves_selected_connect_and_inserts_before_endport(tmp_
     record = inventory.refdes_records[0]
     assert record.connect_block_end_offset is not None
     assert record.unique_net_names == ("DGND", "VDD")
+    assert record.net_node_counts == (("DGND", 1), ("VDD", 1))
     assert record.package_node_count == record.annotated_node_count == 2
     assert [(node.pin, node.net_name) for node in read_connect_nodes(source, record)] == [("1", "VDD"), ("2", "DGND")]
     assert inventory.max_port_number == 7
@@ -478,6 +479,126 @@ def test_generate_port_resolves_selected_connect_and_inserts_before_endport(tmp_
     assert text.count(".EndPort") == 1
 
 
+def test_existing_ports_can_be_inspected_disabled_enabled_and_deleted(tmp_path: Path) -> None:
+    source = tmp_path / "manage-ports.spd"
+    output = tmp_path / "manage-ports-out.spd"
+    source.write_text(
+        ".Connect U3 DUT Checked = 1\n"
+        "A1 $Package.Node5!!A1::VDD\nG1 $Package.Node6!!G1::DGND\n.EndC\n"
+        ".Port\n"
+        "Port1_U1::VDD Auto GenFromCktInstance=\"U1\" GenFromCktModel=\"DUT\"\n"
+        "+ PositiveTerminal $Package.Node1!!A1::VDD $Package.Node2!!A2::VDD\n"
+        "+ NegativeTerminal $Package.Node3!!G1::DGND\n"
+        "Port2_U2::VDD Disabled Auto GenFromCktInstance=\"U2\" GenFromCktModel=\"LGA\"\n"
+        "+ PositiveTerminal $Package.Node4!!A1::VDD\n"
+        "+ NegativeTerminal $Package.Node7!!G1::DGND $Package.Node8!!G2::DGND\n"
+        ".EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+
+    assert [(port.name, port.enabled, port.positive_node_count, port.negative_node_count)
+            for port in inventory.port_records] == [
+        ("Port1_U1::VDD", True, 2, 1),
+        ("Port2_U2::VDD", False, 1, 2),
+    ]
+    write_spd_with_replacements(
+        source,
+        output,
+        inventory.blocks,
+        {},
+        refdes_records=inventory.refdes_records,
+        port_requests=[PortRequest("U3", "VDD", "DGND", enabled=False)],
+        port_deletions=["Port1_U1::VDD"],
+        port_enabled_changes={"Port2_U2::VDD": True},
+        inventory=inventory,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "Port1_U1::VDD" not in text
+    assert "Port2_U2::VDD Auto" in text and "Port2_U2::VDD Disabled" not in text
+    assert "Port3_U3_A1::VDD Disabled Auto" in text
+    assert text.count(".EndPort") == 1
+
+
+def test_port_disabled_state_does_not_touch_quoted_attributes(tmp_path: Path) -> None:
+    source = tmp_path / "quoted-disabled.spd"
+    disabled_output = tmp_path / "quoted-disabled-out.spd"
+    enabled_output = tmp_path / "quoted-enabled-out.spd"
+    source.write_text(
+        ".Port\nPort1_FooDisabled::VDD Auto GenFromCktModel=\"Disabled\" Note=\"Disabled\"\n.EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    assert inventory.port_records[0].enabled
+    write_spd_with_replacements(source, disabled_output, inventory.blocks, {}, port_enabled_changes={"Port1_FooDisabled::VDD": False}, inventory=inventory)
+    disabled_inventory = scan_spd_inventory(disabled_output)
+    assert not disabled_inventory.port_records[0].enabled
+    write_spd_with_replacements(disabled_output, enabled_output, disabled_inventory.blocks, {}, port_enabled_changes={"Port1_FooDisabled::VDD": True}, inventory=disabled_inventory)
+    enabled_inventory = scan_spd_inventory(enabled_output)
+    assert enabled_inventory.port_records[0].enabled
+    text = enabled_output.read_text(encoding="utf-8")
+    assert "Port1_FooDisabled::VDD Auto" in text
+    assert 'GenFromCktModel="Disabled"' in text and 'Note="Disabled"' in text
+
+
+def test_duplicate_port_names_reject_mutation_without_touching_output(tmp_path: Path) -> None:
+    source = tmp_path / "duplicate-ports.spd"
+    output = tmp_path / "duplicate-ports-out.spd"
+    source.write_text(
+        ".Port\nPort1_X::VDD Auto\nPort1_X::VDD Auto\n.EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    output.write_text("sentinel", encoding="utf-8")
+    with pytest.raises(ValueError, match="Duplicate Port names"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, port_enabled_changes={"Port1_X::VDD": False}, inventory=inventory)
+    assert output.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_generate_port_merges_all_matching_dut_pins(tmp_path: Path) -> None:
+    source = tmp_path / "dut.spd"
+    output = tmp_path / "dut-out.spd"
+    source.write_text(
+        ".Connect U1 DUT Checked = 1\n"
+        "A1 $Package.Node10!!A1::VDD\nA2 $Package.Node2!!A2::VDD\n"
+        "A3 $Package.Node7!!A3::VDD\nA4 $Package.Node5!!A4::VDD\nA5 $Package.Node12!!A5::VDD\n"
+        "G1 $Package.Node11!!G1::DGND\nG2 $Package.Node4!!G2::DGND\n"
+        "G3 $Package.Node8!!G3::DGND\nG4 $Package.Node1!!G4::DGND\n"
+        "G5 $Package.Node9!!G5::DGND\nG6 $Package.Node6!!G6::DGND\n"
+        "X1 $Package.Node3!!X1::AUX\n.EndC\n"
+        ".Port\n.EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\nAUX Color = BLUE\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+
+    assert inventory.refdes_records[0].net_node_counts == (("AUX", 1), ("DGND", 6), ("VDD", 5))
+    write_spd_with_replacements(
+        source,
+        output,
+        inventory.blocks,
+        {},
+        refdes_records=inventory.refdes_records,
+        port_requests=[PortRequest("U1", "VDD", "DGND")],
+        inventory=inventory,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert 'Port1_U1::VDD Auto GenFromCktInstance="U1" GenFromCktModel="DUT"' in text
+    assert (
+        "+            PositiveTerminal $Package.Node2!!A2::VDD $Package.Node5!!A4::VDD "
+        "$Package.Node7!!A3::VDD $Package.Node10!!A1::VDD\n"
+        "+                             $Package.Node12!!A5::VDD\n"
+        "+            NegativeTerminal $Package.Node1!!G4::DGND $Package.Node4!!G2::DGND "
+        "$Package.Node6!!G6::DGND $Package.Node8!!G3::DGND\n"
+        "+                             $Package.Node9!!G5::DGND $Package.Node11!!G1::DGND\n"
+    ) in text
+
+
 def test_generate_port_batch_rejects_invalid_mapping_before_output_creation(tmp_path: Path) -> None:
     source = tmp_path / "invalid.spd"
     output = tmp_path / "invalid_out.spd"
@@ -488,7 +609,7 @@ def test_generate_port_batch_rejects_invalid_mapping_before_output_creation(tmp_
         encoding="utf-8",
     )
     inventory = scan_spd_inventory(source)
-    with pytest.raises(ValueError, match="exact two-terminal"):
+    with pytest.raises(ValueError, match="does not map both selected NETs"):
         write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
                                     port_requests=[PortRequest("C1", "VDD", "DGND")], inventory=inventory)
     assert not output.exists()
@@ -540,7 +661,7 @@ def test_generate_port_rejects_duplicate_package_node_base(tmp_path: Path) -> No
     )
     inventory = scan_spd_inventory(source)
     output.write_text("sentinel", encoding="utf-8")
-    with pytest.raises(ValueError, match="exact two-terminal"):
+    with pytest.raises(ValueError, match="duplicate Package.Node"):
         write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
                                     port_requests=[PortRequest("C1", "VDD", "DGND")], inventory=inventory)
     assert output.read_text(encoding="utf-8") == "sentinel"
