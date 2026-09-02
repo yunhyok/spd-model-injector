@@ -18,12 +18,13 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Remove `.SUBCKT` and `.ENDS` wrapper lines before injection.
 - Replace the existing PartialCkt body and export to a new SPD path.
 - Right-click a PartialCkt component to clone it (without cloning RefDes instances) or rename it; exports preserve `.Part` continuation lines and update `.Connect` references.
-- Queue PowerSI ports for selected RefDes rows by merging every Package.Node pin on the chosen target/reference NETs, then write them only through `Export New SPD` without modifying the source file.
+- Select multiple Power channels, queue PowerSI ports for Component→RefDes tree rows, and merge every matching Package.Node pin into each terminal.
+- Inspect existing and pending Ports, change activation with checkboxes, and queue Port deletion or restoration before export.
 - Write output as UTF-8 with LF line endings.
 
 ## Generate Port
 
-The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. After loading an SPD, the right edge provides separate `Model & RefDes` and `Port Generation` workspaces. Select one exact target NET, one exact reference NET, and one or more RefDes rows in the Port Generation workspace, then choose `Generate Port` to queue the requests. The table shows how many matching pins will be merged into each terminal. Review the queue and use `Export New SPD` to write the ports immediately before the existing `.EndPort`; the source file is never modified. A request is rejected as one batch when either selected NET has no Package.Node or Package.Node identifiers are ambiguous.
+The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. After loading an SPD, the right edge provides separate `Model & RefDes` and `Port Generation` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
 
 Port Generation is unavailable when the loaded SPD does not contain one safe existing `.Port`/`.EndPort` section. The application does not create missing Port sections.
 

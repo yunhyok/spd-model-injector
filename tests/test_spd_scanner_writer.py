@@ -522,6 +522,43 @@ def test_existing_ports_can_be_inspected_disabled_enabled_and_deleted(tmp_path: 
     assert text.count(".EndPort") == 1
 
 
+def test_port_disabled_state_does_not_touch_quoted_attributes(tmp_path: Path) -> None:
+    source = tmp_path / "quoted-disabled.spd"
+    disabled_output = tmp_path / "quoted-disabled-out.spd"
+    enabled_output = tmp_path / "quoted-enabled-out.spd"
+    source.write_text(
+        ".Port\nPort1_FooDisabled::VDD Auto GenFromCktModel=\"Disabled\" Note=\"Disabled\"\n.EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    assert inventory.port_records[0].enabled
+    write_spd_with_replacements(source, disabled_output, inventory.blocks, {}, port_enabled_changes={"Port1_FooDisabled::VDD": False}, inventory=inventory)
+    disabled_inventory = scan_spd_inventory(disabled_output)
+    assert not disabled_inventory.port_records[0].enabled
+    write_spd_with_replacements(disabled_output, enabled_output, disabled_inventory.blocks, {}, port_enabled_changes={"Port1_FooDisabled::VDD": True}, inventory=disabled_inventory)
+    enabled_inventory = scan_spd_inventory(enabled_output)
+    assert enabled_inventory.port_records[0].enabled
+    text = enabled_output.read_text(encoding="utf-8")
+    assert "Port1_FooDisabled::VDD Auto" in text
+    assert 'GenFromCktModel="Disabled"' in text and 'Note="Disabled"' in text
+
+
+def test_duplicate_port_names_reject_mutation_without_touching_output(tmp_path: Path) -> None:
+    source = tmp_path / "duplicate-ports.spd"
+    output = tmp_path / "duplicate-ports-out.spd"
+    source.write_text(
+        ".Port\nPort1_X::VDD Auto\nPort1_X::VDD Auto\n.EndPort\n"
+        ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+    )
+    inventory = scan_spd_inventory(source)
+    output.write_text("sentinel", encoding="utf-8")
+    with pytest.raises(ValueError, match="Duplicate Port names"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, port_enabled_changes={"Port1_X::VDD": False}, inventory=inventory)
+    assert output.read_text(encoding="utf-8") == "sentinel"
+
+
 def test_generate_port_merges_all_matching_dut_pins(tmp_path: Path) -> None:
     source = tmp_path / "dut.spd"
     output = tmp_path / "dut-out.spd"

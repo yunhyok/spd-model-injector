@@ -25,4 +25,4 @@ if (-not (Test-Path $installer)) {
     throw "Installer artifact not found: $installer. Run scripts/build.ps1 first."
 }
 
-gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Generate Port now supports DUT/LGA components by merging every Package.Node pin on the selected target and reference NETs into one PowerSI Port terminal. The left/right Port workspace shows existing and pending Ports, pin counts, activation checkboxes, and queued deletion or restore controls."
+gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Generate Port now supports DUT/LGA components by merging every Package.Node pin on each selected Power channel into one terminal. The left/right workspace supports multi-channel selection, automatic DGND reference, Component-to-RefDes candidate trees, existing/pending Port inspection, activation checkboxes, and queued deletion or restore controls."

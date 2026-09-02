@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -220,31 +222,30 @@ class MainWindow(QMainWindow):
 
         self.refdes_label = QLabel("Load an SPD file to inspect RefDes records.")
         self.refdes_label.setWordWrap(True)
-        self.target_net_selector = QComboBox()
-        self.target_net_selector.setObjectName("target_net_selector")
-        self.target_net_selector.setPlaceholderText("Target NET")
-        self.reference_net_selector = QComboBox()
-        self.reference_net_selector.setObjectName("reference_net_selector")
-        self.reference_net_selector.setPlaceholderText("Reference NET")
-        for selector in (self.target_net_selector, self.reference_net_selector):
-            selector.setEnabled(False)
-            selector.currentIndexChanged.connect(self._port_selection_changed)
+        self.power_net_list = QListWidget()
+        self.power_net_list.setObjectName("power_net_list")
+        self.power_net_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.power_net_list.itemChanged.connect(self._port_selection_changed)
+        self.reference_net_display = QLabel("Reference: choose a NET when generating (DGND auto if available)")
+        self.reference_net_display.setWordWrap(True)
         self.port_refdes_filter = QLineEdit()
         self.port_refdes_filter.setPlaceholderText("Search RefDes instances...")
         self.port_refdes_filter.textChanged.connect(self._apply_port_refdes_filter)
-        self.port_refdes_table = QTableWidget(0, 4)
+        self.port_refdes_table = QTreeWidget()
         self.port_refdes_table.setObjectName("port_refdes_table")
-        self.port_refdes_table.setHorizontalHeaderLabels(["RefDes Name", "Component", "Target Pins", "Reference Pins"])
+        self.port_refdes_table.setColumnCount(3)
+        self.port_refdes_table.setHeaderLabels(["Component / RefDes", "Target Channels (Pins)", "Reference Pins"])
         self.port_refdes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.port_refdes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.port_refdes_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.port_refdes_table.setAlternatingRowColors(True)
         self.port_refdes_table.itemSelectionChanged.connect(self._update_generate_port_state)
-        self.port_refdes_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.port_refdes_table.horizontalHeader().resizeSection(0, 180)
-        self.port_refdes_table.horizontalHeader().resizeSection(1, 150)
-        self.port_refdes_table.horizontalHeader().resizeSection(2, 100)
-        self.port_refdes_table.horizontalHeader().resizeSection(3, 110)
+        self.port_refdes_table.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.port_refdes_table.header().resizeSection(0, 180)
+        self.port_refdes_table.header().resizeSection(1, 220)
+        self.port_refdes_table.header().resizeSection(2, 110)
+        self.port_refdes_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.port_refdes_table.customContextMenuRequested.connect(self._show_port_refdes_context_menu)
         self.port_readiness_banner = QLabel("Load an SPD to check Port generation readiness.")
         self.port_readiness_banner.setWordWrap(True)
         self.port_readiness_banner.setFrameShape(QFrame.Shape.StyledPanel)
@@ -442,17 +443,9 @@ class MainWindow(QMainWindow):
         generation_layout = QVBoxLayout(generation_panel)
         generation_layout.addWidget(QLabel("Port Generation"))
         generation_layout.addWidget(self.port_readiness_banner)
-        generation_layout.addWidget(QLabel("1. Select an exact NET pair"))
-        net_row = QHBoxLayout()
-        target_box = QVBoxLayout()
-        target_box.addWidget(QLabel("Target Power NET"))
-        target_box.addWidget(self.target_net_selector)
-        reference_box = QVBoxLayout()
-        reference_box.addWidget(QLabel("Reference NET"))
-        reference_box.addWidget(self.reference_net_selector)
-        net_row.addLayout(target_box)
-        net_row.addLayout(reference_box)
-        generation_layout.addLayout(net_row)
+        generation_layout.addWidget(QLabel("1. Select one or more Target Power NET channels"))
+        generation_layout.addWidget(self.power_net_list, 1)
+        generation_layout.addWidget(self.reference_net_display)
         generation_layout.addWidget(self.port_candidate_label)
         generation_layout.addWidget(self.port_refdes_filter)
         generation_layout.addWidget(self.port_refdes_table, 1)
@@ -537,46 +530,85 @@ class MainWindow(QMainWindow):
     def _apply_port_refdes_filter(self, text: str) -> None:
         self.port_refdes_table.clearSelection()
         needle = text.strip().casefold()
-        for row in range(self.port_refdes_table.rowCount()):
-            item = self.port_refdes_table.item(row, 0)
-            name = item.text().casefold() if item else ""
-            self.port_refdes_table.setRowHidden(row, bool(needle) and needle not in name)
+        for parent_row in range(self.port_refdes_table.topLevelItemCount()):
+            parent = self.port_refdes_table.topLevelItem(parent_row)
+            visible = 0
+            for row in range(parent.childCount()):
+                child = parent.child(row)
+                hidden = bool(needle) and needle not in child.text(0).casefold()
+                child.setHidden(hidden)
+                visible += not hidden
+            parent.setHidden(visible == 0)
+            parent.setExpanded(bool(needle) and visible > 0)
 
     def _port_selection_changed(self) -> None:
         self._populate_port_refdes_table()
         self._update_generate_port_state()
 
+    def _selected_power_nets(self) -> list[str]:
+        return [
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for row in range(self.power_net_list.count())
+            if (item := self.power_net_list.item(row)) is not None
+            and item.checkState() == Qt.CheckState.Checked
+        ]
+
+    def _auto_reference_net(self) -> str | None:
+        return "DGND" if "DGND" in self.inventory.net_names else None
+
     def _populate_port_refdes_table(self) -> None:
-        self.port_refdes_table.setRowCount(0)
+        self.port_refdes_table.clear()
+        self.port_refdes_table.setHeaderLabels(["Component / RefDes", "Target Channels (Pins)", "Reference Pins"])
         self.port_candidate_label.setText("2. Eligible component instances (matching pins are merged): 0")
-        target = str(self.target_net_selector.currentData() or "")
-        reference = str(self.reference_net_selector.currentData() or "")
-        if not target or not reference or target == reference:
+        targets = self._selected_power_nets()
+        reference = self._auto_reference_net() or ""
+        if not targets or any(target == reference for target in targets):
             self._update_port_readiness()
             return
         records = sorted(self.effective_refdes_records(), key=lambda record: record.refdes_name)
         records = [
             record for record in records
-            if target in record.unique_net_names and reference in record.unique_net_names
+            if any(target in record.unique_net_names for target in targets)
+            and (not reference or reference in record.unique_net_names)
         ]
-        self.port_refdes_table.setRowCount(len(records))
-        for row, record in enumerate(records):
-            item = QTableWidgetItem(record.refdes_name)
-            item.setData(Qt.ItemDataRole.UserRole, record.refdes_name)
-            self.port_refdes_table.setItem(row, 0, item)
-            self.port_refdes_table.setItem(row, 1, QTableWidgetItem(record.component_name))
-            self.port_refdes_table.setItem(row, 2, QTableWidgetItem(str(record.node_count_for_net(target))))
-            self.port_refdes_table.setItem(row, 3, QTableWidgetItem(str(record.node_count_for_net(reference))))
+        groups: dict[str, list[RefDesRecord]] = {}
+        for record in records:
+            groups.setdefault(record.component_name, []).append(record)
+        for component, children in sorted(groups.items()):
+            parent = QTreeWidgetItem([component, "", ""])
+            parent.setFlags(parent.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.port_refdes_table.addTopLevelItem(parent)
+            for record in children:
+                item = QTreeWidgetItem(parent)
+                item.setText(0, record.refdes_name)
+                item.setData(0, Qt.ItemDataRole.UserRole, record.refdes_name)
+                item.setText(1, ", ".join(
+                    f"{target} ({record.node_count_for_net(target)})" for target in targets if target in record.unique_net_names
+                ))
+                item.setText(2, str(record.node_count_for_net(reference)) if reference else "—")
+            parent.setExpanded(False)
         self.port_candidate_label.setText(f"2. Eligible component instances (matching pins are merged): {len(records)}")
         self._apply_port_refdes_filter(self.port_refdes_filter.text())
 
     def _selected_port_refdes_names(self) -> list[str]:
         names: list[str] = []
-        for index in self.port_refdes_table.selectionModel().selectedRows(0):
-            item = self.port_refdes_table.item(index.row(), 0)
-            if item:
-                names.append(str(item.data(Qt.ItemDataRole.UserRole) or item.text()))
+        for item in self.port_refdes_table.selectedItems():
+            if item.parent() is not None:
+                names.append(str(item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)))
         return names
+
+    def _port_candidate_count(self) -> int:
+        return sum(self.port_refdes_table.topLevelItem(row).childCount() for row in range(self.port_refdes_table.topLevelItemCount()))
+
+    def _show_port_refdes_context_menu(self, position) -> None:
+        menu = QMenu(self.port_refdes_table)
+        expand = menu.addAction("Expand All")
+        collapse = menu.addAction("Collapse All")
+        selected = menu.exec(self.port_refdes_table.viewport().mapToGlobal(position))
+        if selected is expand:
+            self.port_refdes_table.expandAll()
+        elif selected is collapse:
+            self.port_refdes_table.collapseAll()
 
     def _populate_port_management_table(self) -> None:
         self._updating_port_management_table = True
@@ -681,14 +713,16 @@ class MainWindow(QMainWindow):
             message = "Busy: wait for the current scan/export to finish."
         elif self.inventory.port_insertion_offset is None:
             message = "Port generation unavailable: SPD has no safe .Port/.EndPort section."
-        elif not self.target_net_selector.currentData() or not self.reference_net_selector.currentData():
-            message = "Choose one exact Target Power NET and Reference NET."
-        elif self.target_net_selector.currentData() == self.reference_net_selector.currentData():
+        elif not self._selected_power_nets():
+            message = "Select one or more Target Power NET channels."
+        elif self._auto_reference_net() is None:
+            message = "No DGND found; Generate will ask for a reference NET."
+        elif any(target == self._auto_reference_net() for target in self._selected_power_nets()):
             message = "Target and Reference NET must be different."
-        elif self.port_refdes_table.rowCount() == 0:
+        elif self._port_candidate_count() == 0:
             message = "No component instance has Package.Node pins on both selected NETs."
         elif not self._selected_port_refdes_names():
-            message = f"{self.port_refdes_table.rowCount()} eligible candidates; select one or more component instances."
+            message = f"{self._port_candidate_count()} eligible candidates; select one or more component instances."
         else:
             message = "Ready to queue PowerSI Ports."
         self.port_readiness_banner.setText(message)
@@ -1193,22 +1227,21 @@ class MainWindow(QMainWindow):
     def _inventory_power_nets(self, inventory: SpdInventory) -> tuple[str, ...]:
         return tuple(sorted({str(name) for name in inventory.power_nets if str(name)}))
 
-    def _set_net_selectors(self, target_nets, reference_nets, default_reference_nets=()) -> None:
+    def _set_net_selectors(self, target_nets, reference_nets, _default_reference_nets=()) -> None:
         target_nets = tuple(target_nets)
         reference_nets = tuple(reference_nets)
-        default_reference_nets = tuple(default_reference_nets)
-        for selector, values in ((self.target_net_selector, target_nets), (self.reference_net_selector, reference_nets)):
-            selector.blockSignals(True)
-            selector.clear()
-            selector.addItem("", "")
-            for value in values:
-                selector.addItem(str(value), str(value))
-            selector.blockSignals(False)
-            selector.setEnabled(bool(values))
-        # An unambiguous GroundNets mapping is the safe default.
-        defaults = [net for net in default_reference_nets if net in reference_nets]
-        if len(defaults) == 1:
-            self.reference_net_selector.setCurrentText(defaults[0])
+        self.power_net_list.blockSignals(True)
+        self.power_net_list.clear()
+        for value in target_nets:
+            item = QListWidgetItem(str(value), self.power_net_list)
+            item.setData(Qt.ItemDataRole.UserRole, str(value))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+        self.power_net_list.blockSignals(False)
+        if "DGND" in reference_nets:
+            self.reference_net_display.setText("Reference: Auto: DGND")
+        else:
+            self.reference_net_display.setText("Reference: no DGND found; Generate will ask for an exact reference NET")
         self._populate_port_refdes_table()
         self._update_port_readiness()
         self._update_generate_port_state()
@@ -1221,9 +1254,8 @@ class MainWindow(QMainWindow):
             not self._busy
             and self.spd_path is not None
             and self.inventory.port_insertion_offset is not None
-            and bool(self.target_net_selector.currentData())
-            and bool(self.reference_net_selector.currentData())
-            and self.target_net_selector.currentData() != self.reference_net_selector.currentData()
+            and bool(self._selected_power_nets())
+            and not any(target == self._auto_reference_net() for target in self._selected_power_nets())
             and bool(self._selected_port_refdes_names())
         )
         if hasattr(self, "port_generate_button"):
@@ -1238,16 +1270,31 @@ class MainWindow(QMainWindow):
             self._update_port_readiness()
 
     def generate_ports(self) -> None:
-        target = str(self.target_net_selector.currentData() or "")
-        reference = str(self.reference_net_selector.currentData() or "")
         names = self._selected_port_refdes_names()
-        if not target or not reference or target == reference or not names:
+        targets = self._selected_power_nets()
+        reference = self._auto_reference_net() or ""
+        if not targets or any(target == reference for target in targets) or not names:
             self._append_status("Generate Port requires target/reference NET and one or more RefDes selections.")
             self._update_generate_port_state()
             return
+        if not reference:
+            options = [name for name in self.inventory.net_names if name not in targets]
+            reference, accepted = QInputDialog.getItem(self, "Reference NET", "Select reference NET:", options, 0, False)
+            if not accepted or not reference:
+                return
         existing_keys = set(self.inventory.existing_port_keys)
         pending_keys = {(request.instance, request.target_net) for request in self.pending_port_requests}
-        requests = [PortRequest(instance=name, target_net=target, reference_net=reference) for name in sorted(names)]
+        records = {record.refdes_name: record for record in self.effective_refdes_records()}
+        requests = [
+            PortRequest(instance=name, target_net=target, reference_net=reference)
+            for name in sorted(names)
+            for target in targets
+            if name in records and target in records[name].unique_net_names
+            and (not reference or reference in records[name].unique_net_names)
+        ]
+        if not requests:
+            self._append_status("Generate Port rejected; no selected RefDes has a valid target/reference pair.")
+            return
         request_keys = {(request.instance, request.target_net) for request in requests}
         duplicate_keys = (request_keys & existing_keys) | (request_keys & pending_keys)
         if duplicate_keys:

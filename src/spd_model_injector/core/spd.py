@@ -465,7 +465,7 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
                     instance=instance,
                     target_net=target_net,
                     component_name=component_attr.group(1) if component_attr else "",
-                    enabled=re.search(r"\bDisabled\b", header, re.IGNORECASE) is None,
+                    enabled=_port_enabled_from_header(header),
                     positive_node_count=len(positive_tokens),
                     negative_node_count=len(negative_tokens),
                     header_start_offset=header_start,
@@ -506,18 +506,29 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
 
 def _validate_port_metadata(path: Path, inventory: SpdInventory) -> None:
     fresh = _scan_port_and_netlist(path, inventory.blocks)
+    names = [record.name for record in fresh["port_records"]]
+    if len(names) != len(set(names)):
+        raise ValueError("Duplicate Port names make Port mutation ambiguous.")
     for name in ("port_section_start_offset", "port_section_end_offset", "port_insertion_offset",
                  "existing_port_keys", "port_records", "max_port_number", "ground_nets", "net_names", "power_nets"):
         if getattr(inventory, name) != fresh[name]:
             raise ValueError("SPD metadata changed since scan; reload before changing Ports.")
 
 
+def _port_enabled_from_header(header: str) -> bool:
+    """Read only the independent Disabled state token after the Port name."""
+    match = re.match(r"^\s*\S+(?:\s+(Disabled)(?=\s|$))?", header, re.IGNORECASE)
+    return not bool(match and match.group(1))
+
+
 def _replace_port_enabled(header: str, enabled: bool) -> str:
+    match = re.match(r"^(\s*\S+)(\s+Disabled)?(.*)$", header, re.IGNORECASE | re.DOTALL)
+    if not match:
+        raise ValueError("Invalid Port header.")
+    prefix, state, suffix = match.groups()
     if enabled:
-        return re.sub(r"\s+Disabled(?=\s|$)", "", header, count=1, flags=re.IGNORECASE)
-    if re.search(r"\bDisabled\b", header, re.IGNORECASE):
-        return header
-    return re.sub(r"^(\S+)", r"\1 Disabled", header, count=1)
+        return prefix + suffix
+    return prefix + (state or " Disabled") + suffix
 
 
 def read_block_body(path: str | Path, block: PartialCktBlock) -> str:

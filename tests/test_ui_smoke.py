@@ -5,7 +5,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from openpyxl import Workbook, load_workbook
-from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer, Qt
+from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer, Qt, QPoint
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QMessageBox, QPlainTextEdit, QSplitter, QTabWidget
 
 from spd_model_injector import __version__
@@ -1049,25 +1049,26 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     window.blocks = [_make_block("CAP")]
     window.refdes_records = [record, record2]
     window.rebuild_refdes_groups()
-    window._set_net_selectors(("DGND", "VDD"), ("DGND", "VDD"), ("DGND",))
+    window._set_net_selectors(("VDD",), ("DGND", "VDD"), ("DGND",))
+    window.power_net_list.item(0).setCheckState(Qt.CheckState.Checked)
     window._populate_refdes_table("CAP")
     window.refdes_table.selectRow(0)
-    window.target_net_selector.setCurrentText("VDD")
 
-    assert window.port_refdes_table.rowCount() == 2
+    assert window.port_refdes_table.topLevelItemCount() == 1
+    assert window.port_refdes_table.topLevelItem(0).childCount() == 2
+    window.port_refdes_table.expandAll()
     assert window.selected_refdes_names() == ["C1"]
     assert not window._selected_port_refdes_names()
     assert not window.generate_port_action.isEnabled()
     assert not window.port_export_button.isEnabled()
-    window.port_refdes_table.selectRow(0)
+    first = window.port_refdes_table.topLevelItem(0).child(0)
+    second = window.port_refdes_table.topLevelItem(0).child(1)
+    window.port_refdes_table.setCurrentItem(first)
     window.port_refdes_table.selectionModel().select(
-        window.port_refdes_table.model().index(1, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        window.port_refdes_table.indexFromItem(second, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
     )
 
     assert window.generate_port_action.isEnabled()
-    window.reference_net_selector.setCurrentText("VDD")
-    assert not window.generate_port_action.isEnabled()
-    window.reference_net_selector.setCurrentText("DGND")
     window._set_busy(True)
     assert not window.generate_port_action.isEnabled()
     window._set_busy(False)
@@ -1075,6 +1076,7 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     window._update_generate_port_state()
     assert not window.generate_port_action.isEnabled()
     window.inventory = SpdInventory([], [record, record2], ground_nets=("DGND",), net_names=("DGND", "VDD"), port_insertion_offset=1)
+    window.port_refdes_table.expandAll()
     window.port_refdes_table.selectAll()
     window._update_generate_port_state()
     assert window.generate_port_action.isEnabled()
@@ -1155,18 +1157,21 @@ def test_port_filter_clears_hidden_selection_and_readiness_distinguishes_busy_an
     )
     window.spd_path = source
     window.refdes_records = [eligible, ineligible]
-    window.inventory = SpdInventory([], [eligible, ineligible], port_insertion_offset=1)
+    window.inventory = SpdInventory([], [eligible, ineligible], net_names=("DGND", "VDD"), port_insertion_offset=1)
     window._set_net_selectors(("VDD",), ("DGND", "VDD"), ("DGND",))
-    window.target_net_selector.setCurrentText("VDD")
+    window.power_net_list.item(0).setCheckState(Qt.CheckState.Checked)
 
-    assert window.port_refdes_table.rowCount() == 1
+    assert window.port_refdes_table.topLevelItemCount() == 1
+    assert window.port_refdes_table.topLevelItem(0).childCount() == 1
+    window.port_refdes_table.expandAll()
     assert window.port_candidate_label.text().endswith(": 1")
-    assert window.port_refdes_table.item(0, 2).text() == "3"
-    assert window.port_refdes_table.item(0, 3).text() == "5"
-    window.port_refdes_table.selectRow(0)
+    leaf = window.port_refdes_table.topLevelItem(0).child(0)
+    assert leaf.text(1) == "VDD (3)"
+    assert leaf.text(2) == "5"
+    window.port_refdes_table.setCurrentItem(leaf)
     assert window.generate_port_action.isEnabled()
     window.port_refdes_filter.setText("does-not-match")
-    assert window.port_refdes_table.isRowHidden(0)
+    assert leaf.isHidden()
     assert not window._selected_port_refdes_names()
     assert not window.generate_port_action.isEnabled()
 
@@ -1176,3 +1181,94 @@ def test_port_filter_clears_hidden_selection_and_readiness_distinguishes_busy_an
     window.inventory = SpdInventory([], [eligible, ineligible])
     window._update_generate_port_state()
     assert "no safe .Port/.EndPort section" in window.port_readiness_banner.text()
+
+
+def test_port_workspace_queues_each_checked_power_channel_with_auto_dgnd(monkeypatch, tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    record = RefDesRecord(
+        "CAP", "C1", "Automatic", unique_net_names=("DGND", "VDD"),
+        package_node_count=2, annotated_node_count=2,
+    )
+    record2 = RefDesRecord("CAP", "C2", "Automatic", unique_net_names=("DGND", "VTT"), package_node_count=2, annotated_node_count=2)
+    window.spd_path = tmp_path / "board.spd"
+    window.spd_path.write_text("source\n", encoding="utf-8")
+    window.refdes_records = [record, record2]
+    window.inventory = SpdInventory(
+        [], [record, record2], net_names=("DGND", "VDD", "VTT"), power_nets=("VDD", "VTT"),
+        ground_nets=("DGND",), port_insertion_offset=1,
+    )
+    window.rebuild_refdes_groups()
+    window._set_net_selectors(("VDD", "VTT"), ("DGND", "VDD", "VTT"), ("DGND",))
+    for row in range(window.power_net_list.count()):
+        window.power_net_list.item(row).setCheckState(Qt.CheckState.Checked)
+    first = window.port_refdes_table.topLevelItem(0).child(0)
+    second = window.port_refdes_table.topLevelItem(0).child(1)
+    window.port_refdes_table.setCurrentItem(first)
+    window.port_refdes_table.selectionModel().select(
+        window.port_refdes_table.indexFromItem(second, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    )
+    monkeypatch.setattr("spd_model_injector.ui.main_window.validate_port_requests", lambda *args, **kwargs: [])
+
+    assert window.reference_net_display.text() == "Reference: Auto: DGND"
+    window.port_refdes_table.expandAll()
+    window.generate_ports()
+    assert [(request.instance, request.target_net, request.reference_net) for request in window.pending_port_requests] == [
+        ("C1", "VDD", "DGND"), ("C2", "VTT", "DGND")
+    ]
+
+
+def test_port_workspace_prompts_once_for_reference_when_dgnd_missing(monkeypatch, tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    record = RefDesRecord("CAP", "C1", "Automatic", unique_net_names=("VDD", "VSS"), package_node_count=2, annotated_node_count=2)
+    window.spd_path = tmp_path / "board.spd"
+    window.spd_path.write_text("source\n", encoding="utf-8")
+    window.refdes_records = [record]
+    window.inventory = SpdInventory([], [record], net_names=("VDD", "VSS"), power_nets=("VDD",), ground_nets=("VSS",), port_insertion_offset=1)
+    window._set_net_selectors(("VDD",), ("VDD", "VSS"), ("VSS",))
+    window.power_net_list.item(0).setCheckState(Qt.CheckState.Checked)
+    window.port_refdes_table.expandAll()
+    window.port_refdes_table.setCurrentItem(window.port_refdes_table.topLevelItem(0).child(0))
+    monkeypatch.setattr("spd_model_injector.ui.main_window.QInputDialog.getItem", lambda *args, **kwargs: ("VSS", True))
+    monkeypatch.setattr("spd_model_injector.ui.main_window.validate_port_requests", lambda *args, **kwargs: [])
+    window.generate_ports()
+    assert window.pending_port_requests[0].reference_net == "VSS"
+
+
+def test_port_refdes_tree_context_menu_expands_and_collapses(monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    record = RefDesRecord("CAP", "C1", "Automatic", unique_net_names=("DGND", "VDD"))
+    window.refdes_records = [record]
+    window.inventory = SpdInventory([], [record], net_names=("DGND", "VDD"), power_nets=("VDD",), port_insertion_offset=1)
+    window.spd_path = Path("board.spd")
+    window._set_net_selectors(("VDD",), ("DGND", "VDD"), ("DGND",))
+    window.power_net_list.item(0).setCheckState(Qt.CheckState.Checked)
+    parent = window.port_refdes_table.topLevelItem(0)
+    parent.setExpanded(False)
+
+    class FakeAction:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeMenu:
+        selected = "Expand All"
+
+        def __init__(self, _parent) -> None:
+            self.actions: list[FakeAction] = []
+
+        def addAction(self, text: str) -> FakeAction:
+            action = FakeAction(text)
+            self.actions.append(action)
+            return action
+
+        def exec(self, _position) -> FakeAction:
+            return next(action for action in self.actions if action.text == self.selected)
+
+    monkeypatch.setattr("spd_model_injector.ui.main_window.QMenu", FakeMenu)
+    window._show_port_refdes_context_menu(QPoint())
+    assert parent.isExpanded()
+    FakeMenu.selected = "Collapse All"
+    window._show_port_refdes_context_menu(QPoint())
+    assert not parent.isExpanded()
