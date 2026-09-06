@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.0",
+    [string]$Version = "0.5.0",
     [string]$Repo = "spd-model-injector"
 )
 
@@ -13,16 +13,28 @@ if (-not $gh) {
 }
 
 gh auth status
-
-if (-not (git remote get-url origin 2>$null)) {
-    gh repo create $Repo --private --source . --remote origin
+if ($LASTEXITCODE -ne 0) {
+    throw "GitHub authentication failed. Release stopped."
 }
-
-git push -u origin (git branch --show-current)
 
 $installer = "dist/installer/SPD-Model-Injector-Setup-$Version.exe"
 if (-not (Test-Path $installer)) {
     throw "Installer artifact not found: $installer. Run scripts/build.ps1 first."
 }
 
-gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --notes "Generate Port now supports DUT/LGA components by merging every Package.Node pin on each selected Power channel into one terminal. The left/right workspace supports multi-channel selection, automatic DGND reference, Component-to-RefDes candidate trees, existing/pending Port inspection, activation checkboxes, and queued deletion or restore controls."
+if (-not (git remote get-url origin 2>$null)) {
+    gh repo create $Repo --private --source . --remote origin
+    if ($LASTEXITCODE -ne 0) {
+        throw "GitHub repository creation failed. Release stopped."
+    }
+}
+
+git push -u origin (git branch --show-current)
+if ($LASTEXITCODE -ne 0) {
+    throw "Git push failed. Release stopped."
+}
+
+gh release create "v$Version" $installer --verify-tag --title "SPD Model Injector v$Version" --generate-notes
+if ($LASTEXITCODE -ne 0) {
+    throw "GitHub release creation failed."
+}

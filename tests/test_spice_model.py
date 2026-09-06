@@ -115,3 +115,47 @@ def test_prepare_model_from_file_uses_utf8_lf_text(tmp_path: Path) -> None:
     prepared = prepare_model_for_partialckt(model_path.read_text(encoding="utf-8"), ["10", "20"])
 
     assert prepared == "* source\nC1 10 20 1u\n"
+
+
+def test_prepare_model_maps_only_nodes_case_insensitively() -> None:
+    raw_model = (
+        "* PORT1 and 2 stay unchanged in comments\n"
+        ".SUBCKT DEV Port1 2\n"
+        "RPort1 PORT1 2 2\n"
+        ".MODEL Port1 R(R=2)\n"
+        "X1 port1 2 CHILD RVAL = 2\n"
+        ".ENDS dev\n"
+    )
+
+    assert prepare_model_for_partialckt(raw_model, ["A", "B"]) == (
+        "* PORT1 and 2 stay unchanged in comments\n"
+        "RPort1 A B 2\n"
+        ".MODEL Port1 R(R=2)\n"
+        "X1 A B CHILD RVAL = 2\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_model", "message"),
+    [
+        (".SUBCKT DEV P N\nR1 P N 1\n", "missing its .ENDS"),
+        (".SUBCKT DEV P N\nR1 P N 1\n.ENDS OTHER\n", "does not match"),
+        (".SUBCKT DEV P p\nR1 P p 1\n.ENDS DEV\n", "duplicate port"),
+        (".SUBCKT DEV P N rval=1\nR1 P N {rval}\n.ENDS DEV\n", "Parameterized .SUBCKT"),
+        (".SUBCKT DEV P N\n.PARAM sense=V(P)\nR1 P N 1\n.ENDS DEV\n", r"V\(\)/I\(\) expressions"),
+        (".SUBCKT DEV 1 2\n.PARAM sense=V( 3, 2 )\nR1 1 2 1\n.ENDS DEV\n", r"V\(\)/I\(\) expressions"),
+        (".SUBCKT DEV P N\nQ1 MID P N MODEL\n.ENDS DEV\n", "Unsupported SPICE element"),
+    ],
+)
+def test_prepare_model_rejects_unsafe_or_unsupported_models(raw_model: str, message: str) -> None:
+    with pytest.raises(ModelValidationError, match=message):
+        prepare_model_for_partialckt(raw_model, ["A", "B"])
+
+
+def test_prepare_model_rejects_destination_shorts() -> None:
+    raw_model = ".SUBCKT DEV P N\nR1 P MID 1\nR2 MID N 1\n.ENDS DEV\n"
+
+    with pytest.raises(ModelValidationError, match="duplicate ExtNode"):
+        prepare_model_for_partialckt(raw_model, ["A", "a"])
+    with pytest.raises(ModelValidationError, match="collides with an internal SPICE node"):
+        prepare_model_for_partialckt(raw_model, ["MID", "B"])

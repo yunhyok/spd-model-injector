@@ -28,6 +28,15 @@ The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`
 
 Port Generation is unavailable when the loaded SPD does not contain one safe existing `.Port`/`.EndPort` section. The application does not create missing Port sections.
 
+## Export and workspace safety (0.5.0)
+
+- Repeated exports retain all staged model, RefDes, and Port changes against the original source. Load a new SPD to start a new workspace.
+- A failed load preserves the current workspace. Editing and closing are blocked while a scan or export is running.
+- Export checks that the source file still matches its scanned file identity, size, and modification time. Reload the file if it was changed outside the app.
+- Output is written to a temporary file in the destination folder and replaces the destination only after a successful write. Failed writes preserve an existing output file.
+- Missing or nested `.PartialCkt` end markers are rejected. Full `.SUBCKT` text pasted into the editor is converted before export.
+- SPICE conversion changes supported node fields only, preserving element names and values. Missing/mismatched `.ENDS`, node collisions, parameterized `.SUBCKT` headers, and unsupported or ambiguous element syntax are rejected instead of guessing. Complex vendor dialects may need a prepared PartialCkt body.
+
 ## Port Mapping Rule
 
 Model ports are mapped by order:

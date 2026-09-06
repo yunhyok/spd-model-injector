@@ -1,6 +1,12 @@
 from pathlib import Path
+import os
 import re
+import shutil
+import subprocess
+import sys
 import tomllib
+
+import pytest
 
 from spd_model_injector import __version__
 
@@ -47,3 +53,31 @@ def test_readme_documents_streaming_and_utf8_lf_guarantees() -> None:
     assert "UTF-8" in readme
     assert "LF" in readme
     assert "PartialCkt" in readme
+
+
+def test_app_startup_check_exits_successfully() -> None:
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "PYTHONPATH": str(ROOT / "src")}
+    result = subprocess.run([sys.executable, "-m", "spd_model_injector.app", "--smoke-test"],
+                            cwd=ROOT, env=env, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("script_name, commands, expected", [
+    ("build.ps1", "function global:python { $global:LASTEXITCODE = 7 }; "
+     "function global:pyinstaller { throw 'Unexpected side effect' }; ", b"Tests failed with exit code 7"),
+    ("publish_release.ps1", "function global:gh { $global:LASTEXITCODE = 7 }; "
+     "function global:git { throw 'Unexpected side effect' }; ", b"GitHub authentication failed"),
+])
+def test_build_and_release_stop_when_a_required_command_fails(script_name, commands, expected) -> None:
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+    script = str(ROOT / "scripts" / script_name).replace("'", "''")
+    result = subprocess.run(
+        [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+         commands + f"& '{script}'"],
+        capture_output=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert b"Unexpected side effect" not in result.stderr
