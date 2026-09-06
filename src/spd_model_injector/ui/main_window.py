@@ -222,6 +222,12 @@ class MainWindow(QMainWindow):
 
         self.refdes_label = QLabel("Load an SPD file to inspect RefDes records.")
         self.refdes_label.setWordWrap(True)
+        self.power_net_filter = QLineEdit()
+        self.power_net_filter.setPlaceholderText("Search Power NETs... (Ctrl+F)")
+        self.power_net_filter.setClearButtonEnabled(True)
+        self.power_net_filter.setToolTip("Filter the list by name. Checked NETs remain selected even when hidden.")
+        self.power_net_filter.textChanged.connect(self._apply_power_net_filter)
+        self.power_net_summary = QLabel("Power NETs: 0/0 shown; 0 checked")
         self.power_net_list = QListWidget()
         self.power_net_list.setObjectName("power_net_list")
         self.power_net_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -444,6 +450,8 @@ class MainWindow(QMainWindow):
         generation_layout.addWidget(QLabel("Port Generation"))
         generation_layout.addWidget(self.port_readiness_banner)
         generation_layout.addWidget(QLabel("1. Select one or more Target Power NET channels"))
+        generation_layout.addWidget(self.power_net_filter)
+        generation_layout.addWidget(self.power_net_summary)
         generation_layout.addWidget(self.power_net_list, 1)
         generation_layout.addWidget(self.reference_net_display)
         generation_layout.addWidget(self.port_candidate_label)
@@ -485,7 +493,7 @@ class MainWindow(QMainWindow):
         port_layout.addWidget(port_splitter, 1)
 
         self.workspace_tabs = QTabWidget()
-        self.workspace_tabs.setTabPosition(QTabWidget.TabPosition.East)
+        self.workspace_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.workspace_tabs.addTab(model_root, "Model & RefDes")
         self.workspace_tabs.addTab(port_root, "Port Generation")
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
@@ -501,11 +509,12 @@ class MainWindow(QMainWindow):
         self._import_shortcut.activated.connect(self.import_model_dialog)
 
         self._filter_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
-        self._filter_shortcut.activated.connect(self._focus_component_filter)
+        self._filter_shortcut.activated.connect(self._focus_workspace_filter)
 
-    def _focus_component_filter(self) -> None:
-        self.component_filter.setFocus()
-        self.component_filter.selectAll()
+    def _focus_workspace_filter(self) -> None:
+        search = self.power_net_filter if self.workspace_tabs.currentIndex() == 1 else self.component_filter
+        search.setFocus()
+        search.selectAll()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -553,8 +562,19 @@ class MainWindow(QMainWindow):
             parent.setExpanded(bool(needle) and visible > 0)
 
     def _port_selection_changed(self) -> None:
+        self._apply_power_net_filter(self.power_net_filter.text())
         self._populate_port_refdes_table()
         self._update_generate_port_state()
+
+    def _apply_power_net_filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        visible = checked = 0
+        for row in range(self.power_net_list.count()):
+            item = self.power_net_list.item(row)
+            item.setHidden(needle not in item.text().casefold())
+            visible += not item.isHidden()
+            checked += item.checkState() == Qt.CheckState.Checked
+        self.power_net_summary.setText(f"Power NETs: {visible}/{self.power_net_list.count()} shown; {checked} checked")
 
     def _selected_power_nets(self) -> list[str]:
         return [
@@ -1209,6 +1229,8 @@ class MainWindow(QMainWindow):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
         self.power_net_list.blockSignals(False)
+        self.power_net_filter.clear()
+        self._apply_power_net_filter("")
         if "DGND" in reference_nets:
             self.reference_net_display.setText("Reference: Auto: DGND")
         else:

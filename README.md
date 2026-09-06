@@ -24,7 +24,9 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 ## Generate Port
 
-The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. After loading an SPD, the right edge provides separate `Model & RefDes` and `Port Generation` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
+The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. The top tabs provide separate `Model & RefDes` and `Port Generation` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
+
+In 0.6.0, `Ctrl+F` focuses the component search in `Model & RefDes`, or the Power NET search in `Port Generation`. Power NET search is case-insensitive and filters the displayed list without changing checked targets. The summary shows how many NETs are visible and how many are checked, including hidden items. Clear the search to see all NETs again; loading a new SPD resets the search. The separate RefDes instance search remains available below it.
 
 Port Generation is unavailable when the loaded SPD does not contain one safe existing `.Port`/`.EndPort` section. The application does not create missing Port sections.
 

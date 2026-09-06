@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer, Qt, QPoint
 from PySide6.QtGui import QCloseEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QMessageBox, QPlainTextEdit, QSplitter, QTabWidget
 
 from spd_model_injector import __version__
@@ -65,7 +66,7 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     tabs = window.workspace_tabs
     assert root is not tabs
     assert tabs.count() == 2
-    assert tabs.tabPosition() == QTabWidget.TabPosition.East
+    assert tabs.tabPosition() == QTabWidget.TabPosition.North
     assert [tabs.tabText(i) for i in range(tabs.count())] == ["Model & RefDes", "Port Generation"]
     assert work_splitter is not None
     assert work_splitter.orientation() == Qt.Orientation.Horizontal
@@ -890,6 +891,46 @@ def test_component_filter_hides_non_matching_rows_and_updates_header() -> None:
     assert window.component_list_label.text() == "PartialCkt Components (3/3)"
 
 
+def test_find_shortcut_follows_the_active_workspace() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.show()
+    window.activateWindow()
+    app.processEvents()
+    try:
+        for tab, search in ((0, window.component_filter), (1, window.power_net_filter), (0, window.component_filter)):
+            window.workspace_tabs.setCurrentIndex(tab)
+            search.setText("existing search")
+            app.processEvents()
+            QTest.keyClick(window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+            assert app.focusWidget() is search
+            assert search.selectedText() == "existing search"
+    finally:
+        window.hide()
+
+
+def test_power_net_search_preserves_checked_targets_and_resets_for_new_inventory() -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window._set_net_selectors(("VDD_CORE", "VDD_IO", "VSS"), ("DGND",))
+    window.power_net_list.item(0).setCheckState(Qt.CheckState.Checked)
+    window.power_net_filter.setText(" io ")
+    assert [window.power_net_list.item(i).isHidden() for i in range(3)] == [True, False, True]
+    assert window._selected_power_nets() == ["VDD_CORE"]
+    assert window.power_net_summary.text() == "Power NETs: 1/3 shown; 1 checked"
+    window.power_net_list.item(1).setCheckState(Qt.CheckState.Checked)
+    assert window._selected_power_nets() == ["VDD_CORE", "VDD_IO"]
+    window.power_net_filter.setText("missing")
+    assert window.power_net_summary.text() == "Power NETs: 0/3 shown; 2 checked"
+    window.power_net_filter.clear()
+    assert all(not window.power_net_list.item(i).isHidden() for i in range(3))
+    assert window._selected_power_nets() == ["VDD_CORE", "VDD_IO"]
+    window.power_net_filter.setText("VDD")
+    window._set_net_selectors(("AVCC",), ("DGND",))
+    assert window.power_net_filter.text() == ""
+    assert window.power_net_summary.text() == "Power NETs: 1/1 shown; 0 checked"
+
+
 def test_modified_item_is_visually_marked_after_import(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -1041,7 +1082,8 @@ def test_failed_reload_preserves_the_current_workspace(tmp_path: Path, monkeypat
     )
     window = MainWindow()
     window.load_spd(source)
-    _spin_until(app, lambda: not window._busy, timeout=15.0, what="initial scan to finish")
+    _spin_until(app, lambda: not window._busy and window._scan_thread is None,
+                timeout=15.0, what="initial scan and thread cleanup to finish")
     window.replacements["C1"] = "R 1 2 1\n"
     window.refdes_component_changes["C100"] = "C2"
     window.pending_port_requests = [PortRequest("C100", "VDD", "DGND")]
@@ -1050,7 +1092,8 @@ def test_failed_reload_preserves_the_current_workspace(tmp_path: Path, monkeypat
     monkeypatch.setattr(QMessageBox, "open", lambda _box: None)
 
     window.load_spd(missing)
-    _spin_until(app, lambda: not window._busy, timeout=15.0, what="failed reload to finish")
+    _spin_until(app, lambda: not window._busy and window._scan_thread is None,
+                timeout=15.0, what="failed reload and thread cleanup to finish")
 
     assert window.status_label.text() == "Operation failed."
     assert window.spd_path == source
@@ -1064,7 +1107,8 @@ def test_failed_reload_preserves_the_current_workspace(tmp_path: Path, monkeypat
 
     empty_window = MainWindow()
     empty_window.load_spd(missing)
-    _spin_until(app, lambda: not empty_window._busy, timeout=15.0, what="initial failed scan to finish")
+    _spin_until(app, lambda: not empty_window._busy and empty_window._scan_thread is None,
+                timeout=15.0, what="initial failed scan and thread cleanup to finish")
     assert empty_window.status_label.text() == "Operation failed."
     assert empty_window.spd_path is None
     assert empty_window.blocks == []
