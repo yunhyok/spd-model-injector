@@ -756,6 +756,8 @@ class MainWindow(QMainWindow):
             message = f"{self._port_candidate_count()} eligible candidates; select one or more component instances."
         else:
             message = "Ready to queue PowerSI Ports."
+            if self.inventory.port_section_start_offset is None:
+                message += " A new Port section will be created on export."
         self.port_readiness_banner.setText(message)
 
     def clear_pending_ports(self) -> None:

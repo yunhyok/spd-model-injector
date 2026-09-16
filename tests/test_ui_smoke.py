@@ -1390,6 +1390,38 @@ def test_port_workspace_queues_each_checked_power_channel_with_auto_dgnd(monkeyp
     ]
 
 
+def test_noport_site_selection_enables_generate_and_exports_both_sites(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "noport.spd"
+    output = tmp_path / "generated.spd"
+    source.write_text(
+        ".Connect SITE0 DUT Checked = 1\nA1 $Package.Node1!!A1::VDD/0\nG1 $Package.Node2!!G1::DGND\n.EndC\n"
+        ".Connect SITE1 DUT Checked = 1\nA1 $Package.Node3!!A1::VDD/1\nG1 $Package.Node4!!G1::DGND\n.EndC\n"
+        "* Port description lines\n\n.NetList\nVDD/0 -> PowerNets\nVDD/1 -> PowerNets\nDGND -> GroundNets\n.EndNetList\n.End",
+        encoding="utf-8",
+    )
+    window = MainWindow()
+    window.load_spd(source)
+    _spin_until(app, lambda: not window._busy and window._scan_thread is None, 15, "NoPort scan")
+    window.workspace_tabs.setCurrentIndex(1)
+    for row in range(window.power_net_list.count()):
+        window.power_net_list.item(row).setCheckState(Qt.CheckState.Checked)
+    parent = window.port_refdes_table.topLevelItem(0)
+    assert parent.text(0) == "DUT"
+    parent.setExpanded(True)
+    for row in range(parent.childCount()):
+        parent.child(row).setSelected(True)
+    assert window._selected_port_refdes_names() == ["SITE0", "SITE1"]
+    assert window.port_generate_button.isEnabled()
+    assert "new Port section" in window.port_readiness_banner.text()
+    window.port_generate_button.click()
+    assert [(r.instance, r.target_net) for r in window.pending_port_requests] == [("SITE0", "VDD/0"), ("SITE1", "VDD/1")]
+    window.export_spd(output)
+    _spin_until(app, lambda: not window._busy and window._export_thread is None, 15, "NoPort export")
+    assert scan_spd_inventory(output).existing_port_keys == (("SITE0", "VDD/0"), ("SITE1", "VDD/1"))
+    window.close()
+
+
 def test_port_workspace_prompts_once_for_reference_when_dgnd_missing(monkeypatch, tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()

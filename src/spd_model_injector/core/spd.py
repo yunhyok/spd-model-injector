@@ -351,15 +351,16 @@ def validate_port_requests(
     resolved: list[tuple[PortRequest, RefDesRecord, tuple[str, ...], tuple[str, ...]]] = []
     if inv.port_insertion_offset is None:
         raise ValueError("SPD has no safe .Port/.EndPort section.")
-    with Path(source_path).open("rb") as handle:
-        handle.seek(inv.port_section_start_offset or 0)
-        port_start = _strip_newline(_decode_line(handle.readline()))
-        handle.seek(inv.port_insertion_offset)
-        port_end = _strip_newline(_decode_line(handle.readline()))
-    if not re.match(r"^\.Port(?:\s|$)", port_start, re.IGNORECASE) or not re.match(
-        r"^\.EndPort(?:\s|$)", port_end, re.IGNORECASE
-    ):
-        raise ValueError("Stale or malformed .Port section metadata.")
+    if inv.port_section_start_offset is not None:
+        with Path(source_path).open("rb") as handle:
+            handle.seek(inv.port_section_start_offset)
+            port_start = _strip_newline(_decode_line(handle.readline()))
+            handle.seek(inv.port_insertion_offset)
+            port_end = _strip_newline(_decode_line(handle.readline()))
+        if not re.match(r"^\.Port(?:\s|$)", port_start, re.IGNORECASE) or not re.match(
+            r"^\.EndPort(?:\s|$)", port_end, re.IGNORECASE
+        ):
+            raise ValueError("Stale or malformed .Port section metadata.")
     known_nets = set(inv.net_names)
     for request in requests:
         key = (request.instance, request.target_net)
@@ -425,7 +426,14 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
     with path.open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
         ports = marker_offsets(data, b".Port")
         end_ports = marker_offsets(data, b".EndPort")
-        invalid = len(ports) != 1 or len(end_ports) != 1 or end_ports[0] <= ports[0]
+        nets = marker_offsets(data, b".NetList")
+        end_nets = marker_offsets(data, b".EndNetList")
+        marker_candidates = {
+            match.start() for match in re.finditer(rb"(?im)^[ \t]*\.(?:End)?(?:Port|NetList)(?:[ \t\r\n]|$)", data)
+            if not any(block.block_start_offset <= match.start() < block.block_end_offset for block in blocks)
+        }
+        noncanonical_markers = marker_candidates != set(ports + end_ports + nets + end_nets)
+        invalid = noncanonical_markers or len(ports) != 1 or len(end_ports) != 1 or end_ports[0] <= ports[0]
         start = ports[0] if ports else None
         end_marker = end_ports[0] if end_ports else None
         line_end = data.find(b"\n", end_marker) if end_marker is not None else -1
@@ -490,12 +498,19 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
                     header_line=header + "\n",
                 ))
 
-        nets = marker_offsets(data, b".NetList")
-        end_nets = marker_offsets(data, b".EndNetList")
         net_names: list[str] = []
         power_nets: list[str] = []
         ground_nets: list[str] = []
+        insertion = None if invalid else end_marker
         if len(nets) == 1 and len(end_nets) == 1 and end_nets[0] > nets[0]:
+            if not ports and not end_ports and not noncanonical_markers:
+                # Use the reserved Port location when present, otherwise the NetList boundary.
+                comments = marker_offsets(data, b"* Port description lines")
+                insertion = nets[0]
+                if len(comments) == 1 and comments[0] < nets[0]:
+                    comment_end = data.find(b"\n", comments[0], nets[0])
+                    if comment_end >= 0:
+                        insertion = comment_end + 1
             section = _normalize_newlines(bytes(data[nets[0] : end_nets[0]]).decode("utf-8", errors="replace"))
             group: str | None = None
             for line in section.splitlines()[1:]:
@@ -513,7 +528,7 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
                         net_names.append(raw_net)
                         (power_nets if group.lower() == "powernets" else ground_nets).append(raw_net)
     return {"port_section_start_offset": start, "port_section_end_offset": end,
-            "port_insertion_offset": None if invalid else end_marker,
+            "port_insertion_offset": insertion,
             "existing_port_keys": tuple(dict.fromkeys(keys)), "max_port_number": max_number,
             "port_records": tuple(port_records),
             "ground_nets": tuple(ground_nets), "net_names": tuple(net_names),
@@ -725,9 +740,12 @@ def write_spd_with_replacements(
             )
             port_lines.extend(_format_port_terminal("PositiveTerminal", target_tokens))
             port_lines.extend(_format_port_terminal("NegativeTerminal", reference_tokens))
-        if inv.port_insertion_offset is None or inv.port_section_end_offset is None:
+        if inv.port_insertion_offset is None:
             raise ValueError("SPD has no safe .Port/.EndPort section.")
-        replacement_by_offset[inv.port_insertion_offset] = ("".join(port_lines), inv.port_insertion_offset)
+        port_text = "".join(port_lines)
+        if inv.port_section_start_offset is None:
+            port_text = ".Port\n" + port_text + ".EndPort\n\n"
+        replacement_by_offset[inv.port_insertion_offset] = (port_text, inv.port_insertion_offset)
 
     cursor = 0
     for start_offset, (_, end_offset) in sorted(replacement_by_offset.items()):

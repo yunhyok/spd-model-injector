@@ -28,7 +28,7 @@ The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`
 
 In 0.6.0, `Ctrl+F` focuses the component search in `Model & RefDes`, or the Power NET search in `Port Generation`. Power NET search is case-insensitive and filters the displayed list without changing checked targets. The summary shows how many NETs are visible and how many are checked, including hidden items. Clear the search to see all NETs again; loading a new SPD resets the search. The separate RefDes instance search remains available below it.
 
-Port Generation is unavailable when the loaded SPD does not contain one safe existing `.Port`/`.EndPort` section. The application does not create missing Port sections.
+Files without Ports are supported: export creates a `.Port`/`.EndPort` section at the reserved Port location, or before the valid `.NetList` section if no reserved location exists. Malformed or multiple Port sections remain blocked. Select the SITE0/SITE1 child rows under DUT after checking their Power NETs.
 
 ## Export and workspace safety (0.5.0)
 
