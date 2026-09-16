@@ -669,12 +669,22 @@ def test_generate_port_batch_rejects_invalid_mapping_before_output_creation(tmp_
     assert not output.exists()
 
 
-def test_generate_port_rejects_multiple_port_sections(tmp_path: Path) -> None:
+@pytest.mark.parametrize("section", [
+    ".Port\n.EndPort\n.Port\n.EndPort\n",
+    ".Port\n",
+    ".EndPort\n",
+    ".EndPort\n.Port\n",
+    ".port\n.endport\n",
+    "  .Port\n  .EndPort\n",
+    ".Port\n.EndPort\n.port\n.endport\n",
+    ".Port\n.EndPort\n  .Port\n  .EndPort\n",
+])
+def test_generate_port_rejects_malformed_or_multiple_port_sections(tmp_path: Path, section: str) -> None:
     source = tmp_path / "multi.spd"
     output = tmp_path / "multi_out.spd"
     source.write_text(
         ".Connect C1 CAP Checked = 1\n1 $Package.Node1!!1::VDD\n2 $Package.Node2!!2::DGND\n.EndC\n"
-        ".Port\n.EndPort\n.Port\n.EndPort\n",
+        + section + ".NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
         encoding="utf-8",
     )
     inventory = scan_spd_inventory(source)
@@ -683,6 +693,37 @@ def test_generate_port_rejects_multiple_port_sections(tmp_path: Path) -> None:
         write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
                                     port_requests=[PortRequest("C1", "VDD", "DGND")], inventory=inventory)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("prefix", ["", "* Port description lines\n\n* Other settings\n",
+    ".PartialCkt CAP ExtNode = 1 2\n* Model text\n.Port\n.EndPort\n.EndPartialCkt\n"])
+def test_generate_port_creates_missing_section_and_can_append_after_reload(tmp_path: Path, prefix: str) -> None:
+    source = tmp_path / "noport.spd"
+    output = tmp_path / "ports.spd"
+    second = tmp_path / "more_ports.spd"
+    original = (
+        ".Connect SITE0 DUT Checked = 1\nA1 $Package.Node1!!A1::VDD/0\nG1 $Package.Node2!!G1::DGND\n.EndC\n"
+        ".Connect SITE1 DUT Checked = 1\nA1 $Package.Node3!!A1::VDD/1\nG1 $Package.Node4!!G1::DGND\n.EndC\n"
+        + prefix + ".NetList\nVDD/0 -> PowerNets\nVDD/1 -> PowerNets\nDGND -> GroundNets\n.EndNetList\n.End"
+    ).encode()
+    source.write_bytes(original)
+    inventory = scan_spd_inventory(source)
+    assert inventory.port_section_start_offset is None
+    assert inventory.port_insertion_offset is not None
+    write_spd_with_replacements(source, output, inventory.blocks, {}, inventory=inventory,
+                                port_requests=[PortRequest("SITE0", "VDD/0", "DGND")])
+    text = output.read_text(encoding="utf-8")
+    expected_marker_count = 2 if prefix.startswith(".PartialCkt") else 1
+    assert text.count(".Port\n") == text.count(".EndPort\n") == expected_marker_count
+    assert text.endswith(".End")
+    expected_offset = original.index(b"\n\n") + 1 if prefix.startswith("* Port") else original.index(b".NetList")
+    fresh = scan_spd_inventory(output)
+    assert fresh.port_section_start_offset == expected_offset
+    assert fresh.existing_port_keys == (("SITE0", "VDD/0"),)
+    write_spd_with_replacements(output, second, fresh.blocks, {}, inventory=fresh,
+                                port_requests=[PortRequest("SITE1", "VDD/1", "DGND")])
+    assert scan_spd_inventory(second).existing_port_keys == (("SITE0", "VDD/0"), ("SITE1", "VDD/1"))
+    assert source.read_bytes() == original
 
 
 def test_generate_port_rejects_stale_port_metadata_without_touching_output(tmp_path: Path) -> None:
@@ -702,6 +743,24 @@ def test_generate_port_rejects_stale_port_metadata_without_touching_output(tmp_p
         write_spd_with_replacements(source, output, inventory.blocks, {}, refdes_records=inventory.refdes_records,
                                     port_requests=[PortRequest("C2", "VDD", "DGND")], inventory=inventory)
     assert output.read_text(encoding="utf-8") == "sentinel"
+
+
+@pytest.mark.parametrize("netlist", ["", ".NetList\nVDD -> PowerNets\n",
+    ".NetList\n.EndNetList\n.NetList\n.EndNetList\n", ".EndNetList\n.NetList\n"])
+def test_missing_ports_require_one_complete_netlist(tmp_path: Path, netlist: str) -> None:
+    source = tmp_path / "unsafe.spd"
+    output = tmp_path / "output.spd"
+    source.write_text(
+        ".Connect SITE0 DUT\n1 $Package.Node1!!1::VDD\n2 $Package.Node2!!2::DGND\n.EndC\n" + netlist,
+        encoding="utf-8",
+    )
+    output.write_bytes(b"previous output")
+    inventory = scan_spd_inventory(source)
+    assert inventory.port_insertion_offset is None
+    with pytest.raises(ValueError, match="safe .Port"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, inventory=inventory,
+                                    port_requests=[PortRequest("SITE0", "VDD", "DGND")])
+    assert output.read_bytes() == b"previous output"
 
 
 def test_generate_port_rejects_duplicate_package_node_base(tmp_path: Path) -> None:
