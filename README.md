@@ -24,9 +24,20 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 ## Generate Port
 
-The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. After loading an SPD, the right edge provides separate `Model & RefDes` and `Port Generation` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
+The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. The top tabs provide separate `Model & RefDes` and `Port Generation` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
+
+In 0.6.0, `Ctrl+F` focuses the component search in `Model & RefDes`, or the Power NET search in `Port Generation`. Power NET search is case-insensitive and filters the displayed list without changing checked targets. The summary shows how many NETs are visible and how many are checked, including hidden items. Clear the search to see all NETs again; loading a new SPD resets the search. The separate RefDes instance search remains available below it.
 
 Port Generation is unavailable when the loaded SPD does not contain one safe existing `.Port`/`.EndPort` section. The application does not create missing Port sections.
+
+## Export and workspace safety (0.5.0)
+
+- Repeated exports retain all staged model, RefDes, and Port changes against the original source. Load a new SPD to start a new workspace.
+- A failed load preserves the current workspace. Editing and closing are blocked while a scan or export is running.
+- Export checks that the source file still matches its scanned file identity, size, and modification time. Reload the file if it was changed outside the app.
+- Output is written to a temporary file in the destination folder and replaces the destination only after a successful write. Failed writes preserve an existing output file.
+- Missing or nested `.PartialCkt` end markers are rejected. Full `.SUBCKT` text pasted into the editor is converted before export.
+- SPICE conversion changes supported node fields only, preserving element names and values. Missing/mismatched `.ENDS`, node collisions, parameterized `.SUBCKT` headers, and unsupported or ambiguous element syntax are rejected instead of guessing. Complex vendor dialects may need a prepared PartialCkt body.
 
 ## Port Mapping Rule
 

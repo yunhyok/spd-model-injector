@@ -6,10 +6,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import QEventLoop, QItemSelectionModel, QTimer, Qt, QPoint
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QFrame, QHeaderView, QMessageBox, QPlainTextEdit, QSplitter, QTabWidget
 
 from spd_model_injector import __version__
-from spd_model_injector.core.spd import PartialCktBlock, PortRecord, RefDesRecord, SpdInventory
+from spd_model_injector.core.spd import PartialCktBlock, PortRecord, RefDesRecord, SpdInventory, scan_spd_inventory
 from spd_model_injector.core.spd import PortRequest
 from spd_model_injector.ui.main_window import MainWindow
 from spd_model_injector.ui.workers import ExportWorker
@@ -64,7 +66,7 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     tabs = window.workspace_tabs
     assert root is not tabs
     assert tabs.count() == 2
-    assert tabs.tabPosition() == QTabWidget.TabPosition.East
+    assert tabs.tabPosition() == QTabWidget.TabPosition.North
     assert [tabs.tabText(i) for i in range(tabs.count())] == ["Model & RefDes", "Port Generation"]
     assert work_splitter is not None
     assert work_splitter.orientation() == Qt.Orientation.Horizontal
@@ -889,6 +891,46 @@ def test_component_filter_hides_non_matching_rows_and_updates_header() -> None:
     assert window.component_list_label.text() == "PartialCkt Components (3/3)"
 
 
+def test_find_shortcut_follows_the_active_workspace() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.show()
+    window.activateWindow()
+    app.processEvents()
+    try:
+        for tab, search in ((0, window.component_filter), (1, window.power_net_filter), (0, window.component_filter)):
+            window.workspace_tabs.setCurrentIndex(tab)
+            search.setText("existing search")
+            app.processEvents()
+            QTest.keyClick(window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+            assert app.focusWidget() is search
+            assert search.selectedText() == "existing search"
+    finally:
+        window.hide()
+
+
+def test_power_net_search_preserves_checked_targets_and_resets_for_new_inventory() -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window._set_net_selectors(("VDD_CORE", "VDD_IO", "VSS"), ("DGND",))
+    window.power_net_list.item(0).setCheckState(Qt.CheckState.Checked)
+    window.power_net_filter.setText(" io ")
+    assert [window.power_net_list.item(i).isHidden() for i in range(3)] == [True, False, True]
+    assert window._selected_power_nets() == ["VDD_CORE"]
+    assert window.power_net_summary.text() == "Power NETs: 1/3 shown; 1 checked"
+    window.power_net_list.item(1).setCheckState(Qt.CheckState.Checked)
+    assert window._selected_power_nets() == ["VDD_CORE", "VDD_IO"]
+    window.power_net_filter.setText("missing")
+    assert window.power_net_summary.text() == "Power NETs: 0/3 shown; 2 checked"
+    window.power_net_filter.clear()
+    assert all(not window.power_net_list.item(i).isHidden() for i in range(3))
+    assert window._selected_power_nets() == ["VDD_CORE", "VDD_IO"]
+    window.power_net_filter.setText("VDD")
+    window._set_net_selectors(("AVCC",), ("DGND",))
+    assert window.power_net_filter.text() == ""
+    assert window.power_net_summary.text() == "Power NETs: 1/1 shown; 0 checked"
+
+
 def test_modified_item_is_visually_marked_after_import(tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -942,6 +984,10 @@ def test_busy_state_disables_load_export_validate_actions_and_buttons() -> None:
     assert not window.validate_action.isEnabled()
     assert not window.import_button.isEnabled()
     assert not window.validate_button.isEnabled()
+    assert not window.revert_button.isEnabled()
+    assert not window.editor.isEnabled()
+    assert not window.refdes_table.isEnabled()
+    assert not window.port_management_table.isEnabled()
 
     window._set_busy(False)
 
@@ -950,6 +996,10 @@ def test_busy_state_disables_load_export_validate_actions_and_buttons() -> None:
     assert window.validate_action.isEnabled()
     assert window.import_button.isEnabled()
     assert window.validate_button.isEnabled()
+    assert window.revert_button.isEnabled()
+    assert window.editor.isEnabled()
+    assert window.refdes_table.isEnabled()
+    assert window.port_management_table.isEnabled()
 
 
 def test_main_window_load_spd_populates_components_from_worker(tmp_path: Path) -> None:
@@ -1017,6 +1067,51 @@ def test_load_spd_real_threaded_scan_completes(tmp_path: Path) -> None:
         timeout=15.0,
         what="scan thread/worker refs to be cleared",
     )
+
+
+def test_failed_reload_preserves_the_current_workspace(tmp_path: Path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "board.spd"
+    missing = tmp_path / "missing.spd"
+    source.write_text(
+        ".PartialCkt C1 ExtNode = 1 2\nC 1 2 1u\n.EndPartialCkt\n"
+        ".PartialCkt C2 ExtNode = 1 2\nC 1 2 2u\n.EndPartialCkt\n"
+        ".Connect C100 C1 Checked = 1\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    window = MainWindow()
+    window.load_spd(source)
+    _spin_until(app, lambda: not window._busy and window._scan_thread is None,
+                timeout=15.0, what="initial scan and thread cleanup to finish")
+    window.replacements["C1"] = "R 1 2 1\n"
+    window.refdes_component_changes["C100"] = "C2"
+    window.pending_port_requests = [PortRequest("C100", "VDD", "DGND")]
+    window.port_deletions = {"Port1_OLD::VDD"}
+    window.port_enabled_changes = {"Port2_OLD::VDD": True}
+    monkeypatch.setattr(QMessageBox, "open", lambda _box: None)
+
+    window.load_spd(missing)
+    _spin_until(app, lambda: not window._busy and window._scan_thread is None,
+                timeout=15.0, what="failed reload and thread cleanup to finish")
+
+    assert window.status_label.text() == "Operation failed."
+    assert window.spd_path == source
+    assert [block.component_name for block in window.blocks] == ["C1", "C2"]
+    assert window.replacements == {"C1": "R 1 2 1\n"}
+    assert window.refdes_component_changes == {"C100": "C2"}
+    assert window.pending_port_requests == [PortRequest("C100", "VDD", "DGND")]
+    assert window.port_deletions == {"Port1_OLD::VDD"}
+    assert window.port_enabled_changes == {"Port2_OLD::VDD": True}
+    assert window.editor.isEnabled()
+
+    empty_window = MainWindow()
+    empty_window.load_spd(missing)
+    _spin_until(app, lambda: not empty_window._busy and empty_window._scan_thread is None,
+                timeout=15.0, what="initial failed scan and thread cleanup to finish")
+    assert empty_window.status_label.text() == "Operation failed."
+    assert empty_window.spd_path is None
+    assert empty_window.blocks == []
 
 
 def test_editor_uses_fixed_pitch_font_and_no_wrap() -> None:
@@ -1140,6 +1235,83 @@ def test_existing_port_table_queues_activation_delete_and_restore(tmp_path: Path
     window.port_management_table.selectRow(0)
     window.delete_or_restore_selected_ports()
     assert not window.port_deletions
+
+
+def test_successive_exports_keep_queued_port_changes(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+    source = tmp_path / "board.spd"
+    first_output = tmp_path / "first.spd"
+    second_output = tmp_path / "second.spd"
+    source.write_text(
+        ".Connect U3 DUT Checked = 1\n"
+        "A1 $Package.Node5!!A1::VDD\nG1 $Package.Node6!!G1::DGND\n.EndC\n"
+        ".Port\n"
+        'Port1_U1::VDD Auto GenFromCktInstance="U1" GenFromCktModel="DUT"\n'
+        "+ PositiveTerminal $Package.Node1!!A1::VDD\n+ NegativeTerminal $Package.Node2!!G1::DGND\n"
+        'Port2_U2::VDD Disabled Auto GenFromCktInstance="U2" GenFromCktModel="DUT"\n'
+        "+ PositiveTerminal $Package.Node3!!A1::VDD\n+ NegativeTerminal $Package.Node4!!G1::DGND\n"
+        ".EndPort\n.NetList\nVDD -> PowerNets\nDGND -> GroundNets\n.EndNetList\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    inventory = scan_spd_inventory(source)
+    window = MainWindow()
+    window.spd_path = source
+    window.inventory = inventory
+    window.blocks = inventory.blocks
+    window.refdes_records = inventory.refdes_records
+    window.pending_port_requests = [PortRequest("U3", "VDD", "DGND")]
+    window.port_deletions = {"Port1_U1::VDD"}
+    window.port_enabled_changes = {"Port2_U2::VDD": True}
+
+    for output in (first_output, second_output):
+        worker = ExportWorker(
+            source,
+            output,
+            window.blocks,
+            {},
+            refdes_records=window.refdes_records,
+            port_requests=window.pending_port_requests,
+            port_deletions=sorted(window.port_deletions),
+            port_enabled_changes=window.port_enabled_changes,
+            inventory=window.inventory,
+        )
+        worker.run()
+        if output == first_output:
+            window._export_finished(str(output))
+
+    assert window.pending_port_requests == [PortRequest("U3", "VDD", "DGND")]
+    assert window.port_deletions == {"Port1_U1::VDD"}
+    assert window.port_enabled_changes == {"Port2_U2::VDD": True}
+    for output in (first_output, second_output):
+        text = output.read_text(encoding="utf-8")
+        assert "Port1_U1::VDD" not in text
+        assert "Port2_U2::VDD Auto" in text
+        assert "Port3_U3_A1::VDD Auto" in text
+
+
+def test_close_and_start_entrypoints_refuse_while_a_worker_is_active(tmp_path: Path) -> None:
+    QApplication.instance() or QApplication([])
+
+    class StillRunning:
+        def isRunning(self) -> bool:  # noqa: N802
+            return True
+
+    window = MainWindow()
+    source = tmp_path / "source.spd"
+    window.spd_path = source
+    window._scan_thread = StillRunning()
+    window._set_busy(True)
+    event = QCloseEvent()
+    window.closeEvent(event)
+    window.load_spd(tmp_path / "other.spd")
+    window.export_spd(tmp_path / "out.spd")
+
+    assert not event.isAccepted()
+    assert window.spd_path == source
+    assert window._pending_spd_path is None
+    assert window._export_thread is None
+    assert "Busy:" in window.status_label.text()
 
 
 def test_port_filter_clears_hidden_selection_and_readiness_distinguishes_busy_and_unsafe(tmp_path: Path) -> None:

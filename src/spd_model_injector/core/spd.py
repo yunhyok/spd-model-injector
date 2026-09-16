@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import os
 import re
 import mmap
+from tempfile import NamedTemporaryFile
 from typing import Callable, Mapping, Sequence
 
+from spd_model_injector.core.spice import prepare_model_for_partialckt
 
 _PARTIAL_RE = re.compile(r"^\.PartialCkt\s+(.+?)\s+ExtNode\s*=\s*(.*)$", re.IGNORECASE)
 _PARTIAL_START_RE = re.compile(r"^\.PartialCkt(?:\s|$)", re.IGNORECASE)
@@ -54,6 +56,7 @@ class PartialCktBlock:
     header_lines: list[str]
     source_component_name: str | None = None
     clone_source_name: str | None = None
+    source_signature: tuple[int, int, int, int] | None = None
 
     @property
     def port_count(self) -> int:
@@ -77,6 +80,7 @@ class RefDesRecord:
     net_node_counts: tuple[tuple[str, int], ...] = ()
     package_node_count: int = 0
     annotated_node_count: int = 0
+    source_signature: tuple[int, int, int, int] | None = None
 
     @property
     def net_names(self) -> tuple[str, ...]:
@@ -115,6 +119,7 @@ class SpdInventory:
     ground_nets: tuple[str, ...] = ()
     net_names: tuple[str, ...] = ()
     power_nets: tuple[str, ...] = ()
+    source_signature: tuple[int, int, int, int] | None = None
     refdes_by_component: dict[str, list[RefDesRecord]] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -134,7 +139,8 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
     blocks: list[PartialCktBlock] = []
     refdes_records: list[RefDesRecord] = []
     line_no = 0
-    file_size = spd_path.stat().st_size
+    source_signature = _source_signature(spd_path)
+    file_size = source_signature[2]
     _report_progress(progress_callback, "Opening SPD file", 0, file_size)
 
     with spd_path.open("rb", buffering=_CHUNK_SIZE) as handle:
@@ -220,6 +226,7 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
                 body_end_offset = body_start_offset
                 end_line = line_no
                 block_end_offset = body_start_offset
+                found_end = False
 
                 if pending is not None:
                     current_start, current_raw, current_text, current_line = pending
@@ -228,7 +235,10 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
                             body_end_offset = current_start
                             end_line = current_line
                             block_end_offset = current_start + len(current_raw)
+                            found_end = True
                             break
+                        if _PARTIAL_START_RE.match(current_text):
+                            raise ValueError(f"Nested .PartialCkt before closing block at line {start_line}.")
                         current_start = handle.tell()
                         current_raw = handle.readline()
                         if not current_raw:
@@ -239,6 +249,8 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
                         current_line = line_no
                         current_text = _decode_line(current_raw)
 
+                if not found_end:
+                    raise ValueError(f"Missing .EndPartialCkt for block at line {start_line}.")
                 component_name = _parse_component_name(header_lines[0])
                 blocks.append(
                     PartialCktBlock(
@@ -251,6 +263,7 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
                         body_end_offset=body_end_offset,
                         block_end_offset=block_end_offset,
                         header_lines=header_lines,
+                        source_signature=source_signature,
                     )
                 )
                 _report_progress(
@@ -286,7 +299,10 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
         file_size,
     )
     port_meta = _scan_port_and_netlist(spd_path, blocks)
-    return SpdInventory(blocks=blocks, refdes_records=refdes_records, **port_meta)
+    if _source_signature(spd_path) != source_signature:
+        raise ValueError("SPD changed during scan; reload before editing.")
+    refdes_records = [replace(record, source_signature=source_signature) for record in refdes_records]
+    return SpdInventory(blocks=blocks, refdes_records=refdes_records, source_signature=source_signature, **port_meta)
 
 
 def read_connect_nodes(path: str | Path, record: RefDesRecord) -> list[ConnectNode]:
@@ -558,8 +574,14 @@ def write_spd_with_replacements(
     source = Path(source_path)
     output = Path(output_path)
     _ensure_output_is_not_source(source, output)
+    source_signature = _source_signature(source)
+    if inventory is not None and inventory.source_signature is not None and inventory.source_signature != source_signature:
+        raise ValueError("SPD file or metadata changed since scan; reload before exporting.")
+    if any(record.source_signature is not None and record.source_signature != source_signature
+           for record in (*blocks, *(refdes_records or ()))):
+        raise ValueError("SPD file or metadata changed since scan; reload before exporting.")
     replacement_by_offset: dict[int, tuple[str, int]] = {
-        block.body_start_offset: (_normalize_model_text(replacements[block.component_name]), block.body_end_offset)
+        block.body_start_offset: (_prepare_replacement_body(replacements[block.component_name], block.ext_nodes), block.body_end_offset)
         for block in blocks
         if block.component_name in replacements and block.clone_source_name is None
     }
@@ -609,7 +631,7 @@ def write_spd_with_replacements(
         if body is None:
             body = read_block_body(source_path, source_block)
         header = _rename_partial_header(source_block.header_lines, new_name)
-        clone_text = "\n".join(header) + "\n" + _normalize_model_text(body) + ".EndPartialCkt\n"
+        clone_text = "\n".join(header) + "\n" + _prepare_replacement_body(body, source_block.ext_nodes) + ".EndPartialCkt\n"
         offset = source_block.block_end_offset
         prior = replacement_by_offset.get(offset)
         replacement_by_offset[offset] = ((prior[0] if prior and prior[1] == offset else "") + clone_text, offset)
@@ -707,20 +729,44 @@ def write_spd_with_replacements(
             raise ValueError("SPD has no safe .Port/.EndPort section.")
         replacement_by_offset[inv.port_insertion_offset] = ("".join(port_lines), inv.port_insertion_offset)
 
-    with source.open("rb", buffering=_CHUNK_SIZE) as src, output.open("wb", buffering=_CHUNK_SIZE) as dst:
-        cursor = 0
-        pending_cr = False
-        for start_offset in sorted(replacement_by_offset):
-            replacement, end_offset = replacement_by_offset[start_offset]
-            pending_cr = _copy_range(src, dst, cursor, start_offset, pending_cr)
+    cursor = 0
+    for start_offset, (_, end_offset) in sorted(replacement_by_offset.items()):
+        if not cursor <= start_offset <= end_offset <= source_signature[2]:
+            raise ValueError("Overlapping or stale SPD edit ranges; reload before exporting.")
+        cursor = end_offset
+
+    temporary_path: Path | None = None
+    try:
+        with source.open("rb", buffering=_CHUNK_SIZE) as src, NamedTemporaryFile(
+            mode="wb", buffering=_CHUNK_SIZE, dir=output.parent, prefix=f".{output.name}.", suffix=".tmp", delete=False
+        ) as dst:
+            temporary_path = Path(dst.name)
+            cursor = 0
+            pending_cr = False
+            for start_offset in sorted(replacement_by_offset):
+                replacement, end_offset = replacement_by_offset[start_offset]
+                pending_cr = _copy_range(src, dst, cursor, start_offset, pending_cr)
+                if pending_cr:
+                    dst.write(b"\n")
+                    pending_cr = False
+                dst.write(replacement.encode("utf-8"))
+                cursor = end_offset
+            pending_cr = _copy_range(src, dst, cursor, None, pending_cr)
             if pending_cr:
                 dst.write(b"\n")
-                pending_cr = False
-            dst.write(replacement.encode("utf-8"))
-            cursor = end_offset
-        pending_cr = _copy_range(src, dst, cursor, None, pending_cr)
-        if pending_cr:
-            dst.write(b"\n")
+            dst.flush()
+            os.fsync(dst.fileno())
+        if _source_signature(source) != source_signature:
+            raise ValueError("SPD changed during export; reload before exporting.")
+        os.replace(temporary_path, output)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _source_signature(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 def _ensure_output_is_not_source(source: Path, output: Path) -> None:
@@ -738,6 +784,8 @@ def _copy_range(src, dst, start: int, end: int | None, pending_cr: bool) -> bool
         size = _CHUNK_SIZE if remaining is None else min(_CHUNK_SIZE, remaining)
         chunk = src.read(size)
         if not chunk:
+            if remaining:
+                raise ValueError("SPD ended before the scanned edit range; reload before exporting.")
             break
         if remaining is not None:
             remaining -= len(chunk)
@@ -949,3 +997,11 @@ def _normalize_newlines(text: str) -> str:
 def _normalize_model_text(text: str) -> str:
     normalized = _normalize_newlines(text)
     return normalized if not normalized or normalized.endswith("\n") else normalized + "\n"
+
+
+def _prepare_replacement_body(text: str, ext_nodes: Sequence[str]) -> str:
+    if re.search(r"(?im)^\s*\.(?:End)?PartialCkt(?:\s|$)", text):
+        raise ValueError("Replacement body must not contain .PartialCkt or .EndPartialCkt markers.")
+    if re.search(r"(?im)^\s*\.SUBCKT(?:\s|$)", text):
+        text = prepare_model_for_partialckt(text, ext_nodes)
+    return _normalize_model_text(text)

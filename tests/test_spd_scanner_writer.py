@@ -6,6 +6,60 @@ from spd_model_injector.core import spd
 from spd_model_injector.core.spd import PortRequest, read_block_body, read_connect_nodes, scan_spd, scan_spd_inventory, write_spd_with_replacements
 
 
+def test_export_preserves_existing_output_on_write_failure(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.spd"
+    output = tmp_path / "output.spd"
+    source.write_bytes(b"Title\n.PartialCkt CAP ExtNode = 1 2\nR1 1 2 1\n.EndPartialCkt\n")
+    output.write_bytes(b"previous successful export")
+    inventory = scan_spd_inventory(source)
+
+    def fail_copy(src, dst, start, end, pending_cr):
+        dst.write(b"incomplete")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(spd, "_copy_range", fail_copy)
+    with pytest.raises(OSError, match="disk full"):
+        write_spd_with_replacements(source, output, inventory.blocks, {}, inventory=inventory)
+    assert output.read_bytes() == b"previous successful export"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["output.spd", "source.spd"]
+
+
+@pytest.mark.parametrize("with_inventory", [False, True])
+def test_export_rejects_source_changed_since_scan(tmp_path: Path, with_inventory: bool) -> None:
+    source = tmp_path / "source.spd"
+    output = tmp_path / "output.spd"
+    source.write_bytes(b"Title\n.PartialCkt CAP ExtNode = 1 2\nR1 1 2 1\n.EndPartialCkt\n")
+    inventory = scan_spd_inventory(source)
+    source.write_bytes(b"Added line\n" + source.read_bytes())
+    with pytest.raises(ValueError, match="changed since scan"):
+        write_spd_with_replacements(source, output, inventory.blocks, {"CAP": "C1 1 2 1u\n"},
+                                    inventory=inventory if with_inventory else None)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("body", ["R1 1 2 1\n", ".PartialCkt OTHER ExtNode = 1 2\n.EndPartialCkt\n"])
+def test_scan_rejects_unterminated_or_nested_partialckt(tmp_path: Path, body: str) -> None:
+    source = tmp_path / "bad.spd"
+    source.write_text(".PartialCkt CAP ExtNode = 1 2\n" + body, encoding="utf-8")
+    with pytest.raises(ValueError, match="PartialCkt"):
+        scan_spd_inventory(source)
+
+
+def test_writer_converts_pasted_subckt_and_rejects_structural_markers(tmp_path: Path) -> None:
+    source = tmp_path / "source.spd"
+    output = tmp_path / "output.spd"
+    source.write_bytes(b".PartialCkt CAP ExtNode = A B\nR1 A B 1\n.EndPartialCkt\n")
+    inventory = scan_spd_inventory(source)
+    write_spd_with_replacements(source, output, inventory.blocks,
+                                {"CAP": ".SUBCKT CAP P N\nC1 P N 1u\n.ENDS CAP\n"})
+    expected = b".PartialCkt CAP ExtNode = A B\nC1 A B 1u\n.EndPartialCkt\n"
+    assert output.read_bytes() == expected
+    with pytest.raises(ValueError, match="PartialCkt"):
+        write_spd_with_replacements(source, output, inventory.blocks,
+                                    {"CAP": ".EndPartialCkt\n.PartialCkt OTHER ExtNode = A B\n"})
+    assert output.read_bytes() == expected
+
+
 def test_scan_spd_reads_partialckt_blocks_and_extnode_continuations(tmp_path: Path) -> None:
     spd_path = tmp_path / "board.spd"
     spd_path.write_text(

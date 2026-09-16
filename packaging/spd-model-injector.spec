@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 
 block_cipher = None
 
@@ -17,6 +18,12 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+# Qt uses Windows' ICU ABI; Poppler's same-named DLL on PATH is incompatible.
+a.binaries = [
+    entry for entry in a.binaries
+    if Path(entry[0]).name.lower() != "icuuc.dll"
+    and not Path(entry[0]).name.lower().startswith("icudt")
+]
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,

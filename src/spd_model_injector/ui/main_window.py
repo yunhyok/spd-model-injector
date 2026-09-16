@@ -222,6 +222,12 @@ class MainWindow(QMainWindow):
 
         self.refdes_label = QLabel("Load an SPD file to inspect RefDes records.")
         self.refdes_label.setWordWrap(True)
+        self.power_net_filter = QLineEdit()
+        self.power_net_filter.setPlaceholderText("Search Power NETs... (Ctrl+F)")
+        self.power_net_filter.setClearButtonEnabled(True)
+        self.power_net_filter.setToolTip("Filter the list by name. Checked NETs remain selected even when hidden.")
+        self.power_net_filter.textChanged.connect(self._apply_power_net_filter)
+        self.power_net_summary = QLabel("Power NETs: 0/0 shown; 0 checked")
         self.power_net_list = QListWidget()
         self.power_net_list.setObjectName("power_net_list")
         self.power_net_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -444,6 +450,8 @@ class MainWindow(QMainWindow):
         generation_layout.addWidget(QLabel("Port Generation"))
         generation_layout.addWidget(self.port_readiness_banner)
         generation_layout.addWidget(QLabel("1. Select one or more Target Power NET channels"))
+        generation_layout.addWidget(self.power_net_filter)
+        generation_layout.addWidget(self.power_net_summary)
         generation_layout.addWidget(self.power_net_list, 1)
         generation_layout.addWidget(self.reference_net_display)
         generation_layout.addWidget(self.port_candidate_label)
@@ -485,7 +493,7 @@ class MainWindow(QMainWindow):
         port_layout.addWidget(port_splitter, 1)
 
         self.workspace_tabs = QTabWidget()
-        self.workspace_tabs.setTabPosition(QTabWidget.TabPosition.East)
+        self.workspace_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.workspace_tabs.addTab(model_root, "Model & RefDes")
         self.workspace_tabs.addTab(port_root, "Port Generation")
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
@@ -501,20 +509,32 @@ class MainWindow(QMainWindow):
         self._import_shortcut.activated.connect(self.import_model_dialog)
 
         self._filter_shortcut = QShortcut(QKeySequence("Ctrl+F"), self)
-        self._filter_shortcut.activated.connect(self._focus_component_filter)
+        self._filter_shortcut.activated.connect(self._focus_workspace_filter)
 
-    def _focus_component_filter(self) -> None:
-        self.component_filter.setFocus()
-        self.component_filter.selectAll()
+    def _focus_workspace_filter(self) -> None:
+        search = self.power_net_filter if self.workspace_tabs.currentIndex() == 1 else self.component_filter
+        search.setFocus()
+        search.selectAll()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
-        for action in (self.load_action, self.validate_action, self.export_action):
+        for action in (self.load_action, self.validate_action, self.revert_action, self.export_action):
             action.setEnabled(not busy)
         if self.import_refdes_status_action is not None:
             self.import_refdes_status_action.setEnabled(not busy and bool(self.refdes_records))
-        for button in (self.import_button, self.validate_button):
+        if self.undo_component_change_action is not None:
+            self.undo_component_change_action.setEnabled(not busy and bool(self.refdes_component_undo_stack))
+        for button in (self.import_button, self.validate_button, self.revert_button):
             button.setEnabled(not busy)
+        for widget in (
+            self.component_list,
+            self.editor,
+            self.refdes_table,
+            self.power_net_list,
+            self.port_refdes_table,
+            self.port_management_table,
+        ):
+            widget.setEnabled(not busy)
         if hasattr(self, "clear_pending_ports_action") and self.clear_pending_ports_action is not None:
             self.clear_pending_ports_action.setEnabled(not busy and bool(self.pending_port_requests))
         self._update_generate_port_state()
@@ -542,8 +562,19 @@ class MainWindow(QMainWindow):
             parent.setExpanded(bool(needle) and visible > 0)
 
     def _port_selection_changed(self) -> None:
+        self._apply_power_net_filter(self.power_net_filter.text())
         self._populate_port_refdes_table()
         self._update_generate_port_state()
+
+    def _apply_power_net_filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        visible = checked = 0
+        for row in range(self.power_net_list.count()):
+            item = self.power_net_list.item(row)
+            item.setHidden(needle not in item.text().casefold())
+            visible += not item.isHidden()
+            checked += item.checkState() == Qt.CheckState.Checked
+        self.power_net_summary.setText(f"Power NETs: {visible}/{self.power_net_list.count()} shown; {checked} checked")
 
     def _selected_power_nets(self) -> list[str]:
         return [
@@ -747,10 +778,12 @@ class MainWindow(QMainWindow):
             self._export_worker = None
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        for thread in (self._scan_thread, self._export_thread):
-            if thread is not None and thread.isRunning():
-                thread.quit()
-                thread.wait(5000)
+        if any(thread is not None and thread.isRunning() for thread in (self._scan_thread, self._export_thread)):
+            message = "Busy: wait for the current scan or export to finish before closing."
+            self.status_label.setText(message)
+            self._append_status(message)
+            event.ignore()
+            return
         super().closeEvent(event)
 
     def load_spd_dialog(self) -> None:
@@ -760,41 +793,13 @@ class MainWindow(QMainWindow):
             self.load_spd(path)
 
     def load_spd(self, path: str | Path) -> None:
+        if self._busy:
+            message = "Busy: wait for the current scan or export to finish before loading another SPD."
+            self.status_label.setText(message)
+            self._append_status(message)
+            return
         pending_path = Path(path)
         self._pending_spd_path = pending_path
-        self.inventory = SpdInventory(blocks=[], refdes_records=[])
-        self.blocks = []
-        self.refdes_records = []
-        self.refdes_by_component = {}
-        self.refdes_component_changes.clear()
-        self.refdes_activation_status_changes.clear()
-        self.refdes_component_undo_stack.clear()
-        self.replacements.clear()
-        self.component_renames.clear()
-        self.component_clones.clear()
-        self.pending_port_requests.clear()
-        self.port_deletions.clear()
-        self.port_enabled_changes.clear()
-        self._set_net_selectors((), ())
-        self._populate_port_refdes_table()
-        self._populate_port_management_table()
-        self.component_list.clear()
-        if self.component_filter.text():
-            self.component_filter.blockSignals(True)
-            self.component_filter.clear()
-            self.component_filter.blockSignals(False)
-        self._update_component_header()
-        self._update_undo_component_change_action()
-        if self.export_refdes_action is not None:
-            self.export_refdes_action.setEnabled(False)
-        if self.import_refdes_status_action is not None:
-            self.import_refdes_status_action.setEnabled(False)
-        self._populate_refdes_table(None)
-        self.component_label.setText("No component selected")
-        self.mapping_label.setText("Scanning for PartialCkt blocks...")
-        self._set_editor_text("")
-        self._show_validation("", error=False)
-        self.status_log.clear()
         self._append_status(f"Load requested: {pending_path}")
 
         self.status_label.setText(f"Scanning {pending_path.name}...")
@@ -839,6 +844,11 @@ class MainWindow(QMainWindow):
         self.replacements.clear()
         self.component_renames.clear()
         self.component_clones.clear()
+        self.pending_port_requests.clear()
+        self.port_deletions.clear()
+        self.port_enabled_changes.clear()
+        self._show_validation("", error=False)
+        self.status_log.clear()
         self.populate_components()
         self._populate_port_refdes_table()
         self._populate_port_management_table()
@@ -859,35 +869,13 @@ class MainWindow(QMainWindow):
             self.component_list.setCurrentRow(0)
             self._on_current_row_changed(self.component_list.currentRow())
         else:
+            self.component_label.setText("No component selected")
+            self.mapping_label.setText("No PartialCkt blocks found.")
+            self._set_editor_text("")
             self._populate_refdes_table(None)
 
     def _scan_failed(self, message: str) -> None:
         self._pending_spd_path = None
-        self.spd_path = None
-        self.inventory = SpdInventory(blocks=[], refdes_records=[])
-        self.blocks = []
-        self.refdes_records = []
-        self.refdes_by_component = {}
-        self.refdes_component_changes.clear()
-        self.refdes_activation_status_changes.clear()
-        self.refdes_component_undo_stack.clear()
-        self.replacements.clear()
-        self.component_renames.clear()
-        self.component_clones.clear()
-        self.pending_port_requests.clear()
-        self.port_deletions.clear()
-        self.port_enabled_changes.clear()
-        self._set_net_selectors((), ())
-        self._populate_port_management_table()
-        self.component_list.clear()
-        self._update_component_header()
-        self._update_undo_component_change_action()
-        if self.import_refdes_status_action is not None:
-            self.import_refdes_status_action.setEnabled(False)
-        self._populate_refdes_table(None)
-        self.component_label.setText("No component selected")
-        self.mapping_label.setText("Load an SPD file to inspect PartialCkt blocks.")
-        self._set_editor_text("")
         self._show_worker_error(message)
 
     def populate_components(self) -> None:
@@ -917,6 +905,8 @@ class MainWindow(QMainWindow):
         self.component_list_label.setText(f"PartialCkt Components ({visible}/{total})")
 
     def import_model_dialog(self) -> None:
+        if self._busy:
+            return
         directory = str(self.spd_path.parent) if self.spd_path else ""
         path, _ = QFileDialog.getOpenFileName(
             self, "Import SPICE Model", directory, "Model files (*.mod *.txt);;All files (*)"
@@ -1059,7 +1049,11 @@ class MainWindow(QMainWindow):
         )
 
     def export_spd(self, output_path: str | Path) -> None:
-        if self.spd_path is None:
+        if self.spd_path is None or self._busy:
+            if self._busy:
+                message = "Busy: wait for the current scan or export to finish before exporting."
+                self.status_label.setText(message)
+                self._append_status(message)
             return
         output_path = Path(output_path)
         self.status_label.setText(f"Writing {output_path.name}...")
@@ -1094,9 +1088,6 @@ class MainWindow(QMainWindow):
         self._export_thread.start()
 
     def _export_finished(self, output_path: str) -> None:
-        self.pending_port_requests.clear()
-        self.port_deletions.clear()
-        self.port_enabled_changes.clear()
         self._populate_port_management_table()
         self.progress.setVisible(False)
         self._set_busy(False)
@@ -1238,6 +1229,8 @@ class MainWindow(QMainWindow):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
         self.power_net_list.blockSignals(False)
+        self.power_net_filter.clear()
+        self._apply_power_net_filter("")
         if "DGND" in reference_nets:
             self.reference_net_display.setText("Reference: Auto: DGND")
         else:
