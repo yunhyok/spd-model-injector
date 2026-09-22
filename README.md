@@ -20,19 +20,32 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Right-click a PartialCkt component to clone it (without cloning RefDes instances) or rename it; exports preserve `.Part` continuation lines and update `.Connect` references.
 - Select multiple Power channels, queue PowerSI ports for Component→RefDes tree rows, and merge every matching Package.Node pin into each terminal.
 - Inspect existing and pending Ports, change activation with checkboxes, and queue Port deletion or restoration before export.
+- Queue PowerDC DC settings (`Voltage` and pairing `GroundNet`) per Power NET channel, with search, multi-selection, and voltage auto-fill from the NET name.
 - Write output as UTF-8 with LF line endings.
 
 ## Generate Port
 
-The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `View`, and `Help`. The top tabs provide separate `Model & RefDes` and `Port Generation` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
+The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `DC`, `View`, and `Help`. The top tabs provide separate `Model & RefDes`, `Port Generation`, and `DC Setting` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
 
-In 0.6.0, `Ctrl+F` focuses the component search in `Model & RefDes`, or the Power NET search in `Port Generation`. Power NET search is case-insensitive and filters the displayed list without changing checked targets. The summary shows how many NETs are visible and how many are checked, including hidden items. Clear the search to see all NETs again; loading a new SPD resets the search. The separate RefDes instance search remains available below it.
+In 0.6.0, `Ctrl+F` focuses the component search in `Model & RefDes`, or the Power NET search in `Port Generation` (and, since 0.7.0, the channel search in `DC Setting`). Power NET search is case-insensitive and filters the displayed list without changing checked targets. The summary shows how many NETs are visible and how many are checked, including hidden items. Clear the search to see all NETs again; loading a new SPD resets the search. The separate RefDes instance search remains available below it.
 
 Files without Ports are supported: export creates a `.Port`/`.EndPort` section at the reserved Port location, or before the valid `.NetList` section if no reserved location exists. Malformed or multiple Port sections remain blocked. Select the SITE0/SITE1 child rows under DUT after checking their Power NETs.
 
+## DC Setting (0.7.0)
+
+The `DC Setting` tab prepares a PowerSI board for PowerDC. It lists every `PowerNets` member of `.NetList` (active and inactive) with its current `Voltage` and `GroundNet`. Search filters the list, and rows support multi-selection (`Ctrl`/`Shift`-click, or `Ctrl+A` on the filtered list). Enter a `Pairing P/G NET` (defaults to `DGND` when present) and `Volt (V)`, then `Apply to Selected` to queue the setting for every selected visible row; `Auto-fill Selected` reads the voltage from each NET name instead (`VDD085` → 0.85 V, `VDD075` → 0.75 V, `VDD18` → 1.8 V, `VDD12` → 1.2 V, `1V8`/`0P75`/`1.2V` styles; 1 V when nothing looks like a voltage). Pending rows are highlighted and can be reverted or cleared before export.
+
+On export each queued NET line gains `Voltage = <V> GroundNet = <NET>`, replacing any previous values, exactly as PowerDC writes them:
+
+```text
+	ADC_VDDI_TRIP0/0 Color = BLUE Voltage = 0.95 GroundNet = DGND
+```
+
+Applying a setting to an inactive (`::Unselected`) NET also activates it, because PowerDC only simulates active nets. The pairing NET must be an active NET in `.NetList`. Nothing else in the file is touched; the NetList is neither reordered nor re-flagged. Files saved by PowerDC (`||DropShape` flags on NET and group tokens) are now parsed correctly, so their Power NETs and `DGND` are available in `Port Generation` and `DC Setting`.
+
 ## Export and workspace safety (0.5.0)
 
-- Repeated exports retain all staged model, RefDes, and Port changes against the original source. Load a new SPD to start a new workspace.
+- Repeated exports retain all staged model, RefDes, Port, and DC changes against the original source. Load a new SPD to start a new workspace.
 - A failed load preserves the current workspace. Editing and closing are blocked while a scan or export is running.
 - Export checks that the source file still matches its scanned file identity, size, and modification time. Reload the file if it was changed outside the app.
 - Output is written to a temporary file in the destination folder and replaces the destination only after a successful write. Failed writes preserve an existing output file.

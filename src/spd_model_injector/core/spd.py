@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+import math
 import os
 import re
 import mmap
@@ -107,6 +108,28 @@ class PortRecord:
 
 
 @dataclass(frozen=True)
+class PowerNetRecord:
+    """One PowerNets member line of .NetList, selected or not."""
+
+    net_name: str
+    selected: bool
+    voltage: str
+    ground_net: str
+    line_start_offset: int
+    line_end_offset: int
+    line: str
+
+
+@dataclass(frozen=True)
+class DcSetting:
+    """PowerDC pairing queued by the UI: ``Voltage = V GroundNet = G`` on one power NET."""
+
+    net_name: str
+    voltage: float
+    ground_net: str
+
+
+@dataclass(frozen=True)
 class SpdInventory:
     blocks: list[PartialCktBlock]
     refdes_records: list[RefDesRecord]
@@ -119,6 +142,7 @@ class SpdInventory:
     ground_nets: tuple[str, ...] = ()
     net_names: tuple[str, ...] = ()
     power_nets: tuple[str, ...] = ()
+    power_net_records: tuple[PowerNetRecord, ...] = ()
     source_signature: tuple[int, int, int, int] | None = None
     refdes_by_component: dict[str, list[RefDesRecord]] = field(init=False)
 
@@ -501,6 +525,7 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
         net_names: list[str] = []
         power_nets: list[str] = []
         ground_nets: list[str] = []
+        power_net_records: list[PowerNetRecord] = []
         insertion = None if invalid else end_marker
         if len(nets) == 1 and len(end_nets) == 1 and end_nets[0] > nets[0]:
             if not ports and not end_ports and not noncanonical_markers:
@@ -511,28 +536,52 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
                     comment_end = data.find(b"\n", comments[0], nets[0])
                     if comment_end >= 0:
                         insertion = comment_end + 1
-            section = _normalize_newlines(bytes(data[nets[0] : end_nets[0]]).decode("utf-8", errors="replace"))
+            # Walk NetList lines by byte offset so DC settings can rewrite a line in place.
             group: str | None = None
-            for line in section.splitlines()[1:]:
+            header_end = data.find(b"\n", nets[0], end_nets[0])
+            cursor = end_nets[0] if header_end < 0 else header_end + 1
+            while cursor < end_nets[0]:
+                next_line = data.find(b"\n", cursor, end_nets[0])
+                line_end = end_nets[0] if next_line < 0 else next_line + 1
+                line = _strip_newline(bytes(data[cursor:line_end]).decode("utf-8", errors="replace"))
+                line_start, cursor = cursor, line_end
+                selected = "::unselected" not in line.casefold()
                 arrow = re.match(r"^\s*(\S+)\s*->\s*(\S+)", line)
                 if arrow:
-                    raw_net, group = arrow.group(1), arrow.group(2).split("::", 1)[0]
-                    if "::unselected" not in line.casefold():
+                    raw_net, group = _net_token_name(arrow.group(1)), _net_token_name(arrow.group(2))
+                    if selected:
                         if raw_net not in net_names: net_names.append(raw_net)
                         if group.lower() == "powernets" and raw_net not in power_nets: power_nets.append(raw_net)
                         if group.lower() == "groundnets" and raw_net not in ground_nets: ground_nets.append(raw_net)
-                    continue
-                if group and group.lower() in {"powernets", "groundnets"} and line.strip():
-                    raw_net = line.strip().split("::", 1)[0].split(None, 1)[0]
-                    if raw_net and "::unselected" not in line.casefold() and raw_net not in net_names:
+                elif group and group.lower() in {"powernets", "groundnets"} and line.strip():
+                    raw_net = _net_token_name(line.strip().split(None, 1)[0])
+                    if raw_net and selected and raw_net not in net_names:
                         net_names.append(raw_net)
                         (power_nets if group.lower() == "powernets" else ground_nets).append(raw_net)
+                else:
+                    continue
+                if raw_net and group.lower() == "powernets":
+                    power_net_records.append(PowerNetRecord(
+                        net_name=raw_net, selected=selected,
+                        voltage=_net_attribute(line, "Voltage"), ground_net=_net_attribute(line, "GroundNet"),
+                        line_start_offset=line_start, line_end_offset=line_end, line=line,
+                    ))
     return {"port_section_start_offset": start, "port_section_end_offset": end,
             "port_insertion_offset": insertion,
             "existing_port_keys": tuple(dict.fromkeys(keys)), "max_port_number": max_number,
             "port_records": tuple(port_records),
             "ground_nets": tuple(ground_nets), "net_names": tuple(net_names),
-            "power_nets": tuple(power_nets)}
+            "power_nets": tuple(power_nets), "power_net_records": tuple(power_net_records)}
+
+
+def _net_token_name(token: str) -> str:
+    """Strip ``::Unselected`` / ``||DropShape`` style flags from a NetList name or group token."""
+    return token.split("::", 1)[0].split("||", 1)[0]
+
+
+def _net_attribute(line: str, key: str) -> str:
+    match = re.search(rf"\b{key}\s*=\s*(\S+)", line, re.IGNORECASE)
+    return match.group(1) if match else ""
 
 
 def _validate_port_metadata(path: Path, inventory: SpdInventory) -> None:
@@ -541,9 +590,48 @@ def _validate_port_metadata(path: Path, inventory: SpdInventory) -> None:
     if len(names) != len(set(names)):
         raise ValueError("Duplicate Port names make Port mutation ambiguous.")
     for name in ("port_section_start_offset", "port_section_end_offset", "port_insertion_offset",
-                 "existing_port_keys", "port_records", "max_port_number", "ground_nets", "net_names", "power_nets"):
+                 "existing_port_keys", "port_records", "max_port_number", "ground_nets", "net_names", "power_nets",
+                 "power_net_records"):
         if getattr(inventory, name) != fresh[name]:
-            raise ValueError("SPD metadata changed since scan; reload before changing Ports.")
+            raise ValueError("SPD metadata changed since scan; reload before exporting Port or DC changes.")
+
+
+_VOLTAGE_NAME_PATTERNS = (
+    re.compile(r"(?<![0-9.])(\d+)[VP](\d+)(?![0-9])", re.IGNORECASE),  # 1V8, 0P75, 3V3, 1P8V
+    re.compile(r"(?<![0-9.])(\d+)\.(\d+)(?![0-9])"),  # 1.2, 0.75V
+    re.compile(r"(?<![0-9.])(\d+)V(?![0-9A-Z])", re.IGNORECASE),  # 5V, 12V
+    re.compile(r"(?<![0-9])(\d{2,3})(?![0-9])"),  # VDD085 -> 0.85, VDD18 -> 1.8, VDD105 -> 1.05
+)
+
+
+def infer_voltage(net_name: str) -> float | None:
+    """Guess a rail voltage from a NET name; None when nothing looks like a voltage."""
+    name = re.sub(r"/\d+$", "", net_name)
+    for index, pattern in enumerate(_VOLTAGE_NAME_PATTERNS):
+        match = pattern.search(name)
+        if not match:
+            continue
+        groups = match.groups()
+        if index == 2:
+            value = float(groups[0])
+        elif index == 3:
+            digits = groups[0]
+            value = float(f"0.{digits[1:]}") if digits[0] == "0" else float(f"{digits[0]}.{digits[1:]}")
+        else:
+            value = float(f"{groups[0]}.{groups[1]}")
+        return value if value > 0 else None
+    return None
+
+
+def format_voltage(voltage: float) -> str:
+    return f"{float(voltage):g}"
+
+
+def _apply_dc_setting(line: str, voltage: float, ground_net: str) -> str:
+    """Select the NET and set ``Voltage``/``GroundNet`` the way PowerDC writes them."""
+    line = re.sub(r"::Unselected(?=\|\||\s|$)", "", line, flags=re.IGNORECASE)
+    line = re.sub(r"\s+(?:Voltage|GroundNet)\s*=\s*\S+", "", line, flags=re.IGNORECASE)
+    return f"{line.rstrip()} Voltage = {format_voltage(voltage)} GroundNet = {ground_net}"
 
 
 def _port_enabled_from_header(header: str) -> bool:
@@ -583,6 +671,7 @@ def write_spd_with_replacements(
     port_requests: Sequence[PortRequest] | None = None,
     port_deletions: Sequence[str] | None = None,
     port_enabled_changes: Mapping[str, bool] | None = None,
+    dc_settings: Sequence[DcSetting] | None = None,
     inventory: SpdInventory | None = None,
 ) -> None:
     """Write a new SPD, replacing selected bodies and component identities."""
@@ -698,7 +787,8 @@ def write_spd_with_replacements(
 
     deletion_names = tuple(dict.fromkeys(port_deletions or ()))
     enabled_changes = dict(port_enabled_changes or {})
-    inv = inventory or (scan_spd_inventory(source) if port_requests or deletion_names or enabled_changes else None)
+    dc_list = list(dc_settings or ())
+    inv = inventory or (scan_spd_inventory(source) if port_requests or deletion_names or enabled_changes or dc_list else None)
     if inv is not None:
         _validate_port_metadata(source, inv)
         records = {record.name: record for record in inv.port_records}
@@ -746,6 +836,36 @@ def write_spd_with_replacements(
         if inv.port_section_start_offset is None:
             port_text = ".Port\n" + port_text + ".EndPort\n\n"
         replacement_by_offset[inv.port_insertion_offset] = (port_text, inv.port_insertion_offset)
+
+    if dc_list:
+        assert inv is not None
+        power_records: dict[str, list[PowerNetRecord]] = {}
+        for record in inv.power_net_records:
+            power_records.setdefault(record.net_name, []).append(record)
+        known_nets = set(inv.net_names)
+        seen_nets: set[str] = set()
+        for setting in dc_list:
+            matches = power_records.get(setting.net_name, [])
+            if not matches:
+                raise ValueError(f"Unknown power NET: {setting.net_name}")
+            if len(matches) > 1:
+                raise ValueError(f"Duplicate .NetList entries make DC setting ambiguous: {setting.net_name}")
+            if setting.net_name in seen_nets:
+                raise ValueError(f"Duplicate DC setting: {setting.net_name}")
+            if not setting.ground_net or any(char.isspace() for char in setting.ground_net):
+                raise ValueError("Pairing P/G NET is required.")
+            if setting.ground_net == setting.net_name:
+                raise ValueError("Pairing P/G NET must differ from the power NET.")
+            if setting.ground_net not in known_nets:
+                raise ValueError(f"Pairing P/G NET is not present in .NetList: {setting.ground_net}")
+            if isinstance(setting.voltage, bool) or not math.isfinite(float(setting.voltage)):
+                raise ValueError(f"Voltage must be a finite number: {setting.net_name}")
+            seen_nets.add(setting.net_name)
+            record = matches[0]
+            replacement_by_offset[record.line_start_offset] = (
+                _apply_dc_setting(record.line, float(setting.voltage), setting.ground_net) + "\n",
+                record.line_end_offset,
+            )
 
     cursor = 0
     for start_offset, (_, end_offset) in sorted(replacement_by_offset.items()):

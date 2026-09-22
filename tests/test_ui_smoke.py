@@ -65,9 +65,9 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
 
     tabs = window.workspace_tabs
     assert root is not tabs
-    assert tabs.count() == 2
+    assert tabs.count() == 3
     assert tabs.tabPosition() == QTabWidget.TabPosition.North
-    assert [tabs.tabText(i) for i in range(tabs.count())] == ["Model & RefDes", "Port Generation"]
+    assert [tabs.tabText(i) for i in range(tabs.count())] == ["Model & RefDes", "Port Generation", "DC Setting"]
     assert work_splitter is not None
     assert work_splitter.orientation() == Qt.Orientation.Horizontal
     assert work_splitter.count() == 2
@@ -80,12 +80,16 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert window.status_log.parent() is not work_splitter.widget(0)
     assert window.status_log.parent() is not work_splitter.widget(1)
     menu_actions = window.menuBar().actions()
-    assert [action.text() for action in menu_actions] == ["File", "Edit", "Model", "Port", "View", "Help"]
+    assert [action.text() for action in menu_actions] == ["File", "Edit", "Model", "Port", "DC", "View", "Help"]
     assert [action.text() for action in menu_actions[0].menu().actions()] == [
         "Load SPD", "Export New SPD", "", "Export RefDes Excel", "Import RefDes Excel", "", "Exit"
     ]
     assert [action.text() for action in menu_actions[2].menu().actions()] == ["Validate/Convert", "Revert"]
     assert [action.text() for action in menu_actions[3].menu().actions()] == ["Generate Port", "Clear Pending Ports"]
+    assert [action.text() for action in menu_actions[4].menu().actions()] == [
+        "Apply DC Setting to Selected", "Auto-fill Selected (Volt from NET name)", "Revert Selected DC Setting", "Clear Pending DC Settings"
+    ]
+    assert [action.text() for action in menu_actions[5].menu().actions()] == ["Model & RefDes", "Port Generation", "DC Setting"]
     window.resize(900, 600)
     window.show()
     app.processEvents()
@@ -95,9 +99,13 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert window.status_log.isVisible()
     window.port_workspace_action.trigger()
     assert window.port_workspace_action.isChecked()
+    window.dc_workspace_action.trigger()
+    assert window.workspace_tabs.currentIndex() == 2
+    assert window.dc_workspace_action.isChecked() and not window.port_workspace_action.isChecked()
     window.model_workspace_action.trigger()
     assert window.workspace_tabs.currentIndex() == 0
     assert window.model_workspace_action.isChecked() and not window.port_workspace_action.isChecked()
+    assert not window.dc_workspace_action.isChecked()
 
 
 def test_refdes_menu_and_drop_share_auto_detection_and_help_action(monkeypatch, tmp_path: Path) -> None:
@@ -898,7 +906,7 @@ def test_find_shortcut_follows_the_active_workspace() -> None:
     window.activateWindow()
     app.processEvents()
     try:
-        for tab, search in ((0, window.component_filter), (1, window.power_net_filter), (0, window.component_filter)):
+        for tab, search in ((0, window.component_filter), (1, window.power_net_filter), (2, window.dc_net_filter), (0, window.component_filter)):
             window.workspace_tabs.setCurrentIndex(tab)
             search.setText("existing search")
             app.processEvents()
