@@ -30,7 +30,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [InstallDelete]
 ; The PyInstaller bundle changes between versions. Packages left behind by an upgrade (for example a numpy
-; folder without __init__.py once numpy was dropped in 0.8.1) are imported as namespace packages and crash
+; folder without __init__.py once numpy was dropped in 0.8.0) are imported as namespace packages and crash
 ; the app at startup, so wipe the bundle directory before copying the new one.
 Type: filesandordirs; Name: "{app}\_internal"
 
