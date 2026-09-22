@@ -4,10 +4,11 @@ import csv
 from dataclasses import dataclass, replace
 import html
 import io
+import math
 from pathlib import Path
 
 from openpyxl import load_workbook
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QItemSelectionModel, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,10 +45,13 @@ from PySide6.QtWidgets import (
 from spd_model_injector import __version__
 from spd_model_injector.core.refdes_export import export_refdes_xlsx
 from spd_model_injector.core.spd import (
+    DcSetting,
     PartialCktBlock,
     PortRequest,
     RefDesRecord,
     SpdInventory,
+    format_voltage,
+    infer_voltage,
     read_block_body,
     validate_port_requests,
 )
@@ -192,6 +196,7 @@ class MainWindow(QMainWindow):
         self.pending_port_requests: list[PortRequest] = []
         self.port_deletions: set[str] = set()
         self.port_enabled_changes: dict[str, bool] = {}
+        self.dc_settings: dict[str, DcSetting] = {}
         self._updating_port_management_table = False
         self._loading_editor = False
         self._busy = False
@@ -277,6 +282,40 @@ class MainWindow(QMainWindow):
         self.port_management_table.horizontalHeader().resizeSection(1, 280)
         self.port_management_table.horizontalHeader().resizeSection(2, 140)
         self.port_management_table.horizontalHeader().resizeSection(3, 160)
+        self.dc_net_filter = QLineEdit()
+        self.dc_net_filter.setPlaceholderText("Search Power NETs... (Ctrl+F)")
+        self.dc_net_filter.setClearButtonEnabled(True)
+        self.dc_net_filter.setToolTip("Filter the channel list by name. Apply acts on selected visible rows only.")
+        self.dc_net_filter.textChanged.connect(self._apply_dc_filter)
+        self.dc_summary = QLabel("Power NETs: 0/0 shown; 0 selected; 0 pending")
+        self.dc_table = QTableWidget(0, 5)
+        self.dc_table.setObjectName("dc_table")
+        self.dc_table.setHorizontalHeaderLabels(["Power NET", "Active", "Pairing P/G NET", "Volt (V)", "Status"])
+        self.dc_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.dc_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.dc_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.dc_table.setAlternatingRowColors(True)
+        self.dc_table.setSortingEnabled(True)
+        self.dc_table.itemSelectionChanged.connect(self._update_dc_state)
+        self.dc_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.dc_table.customContextMenuRequested.connect(self._show_dc_context_menu)
+        self.dc_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.dc_table.horizontalHeader().setStretchLastSection(True)
+        self.dc_table.horizontalHeader().resizeSection(0, 320)
+        self.dc_table.horizontalHeader().resizeSection(1, 110)
+        self.dc_table.horizontalHeader().resizeSection(2, 180)
+        self.dc_table.horizontalHeader().resizeSection(3, 100)
+        self.dc_table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        # Sorting moves items between rows while hidden flags stay by row index; re-filter after each sort.
+        self.dc_table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: self._apply_dc_filter(self.dc_net_filter.text()))
+        self.dc_ground_combo = QComboBox()
+        self.dc_ground_combo.setEditable(True)
+        self.dc_ground_combo.setToolTip("Ground NET paired with the selected power channels (DGND when available)")
+        self.dc_volt_edit = QLineEdit()
+        self.dc_volt_edit.setPlaceholderText("e.g. 0.95")
+        self.dc_volt_edit.setToolTip("Voltage applied by 'Apply to Selected'. 'Auto-fill' reads it from each NET name instead.")
+        self.dc_volt_edit.setMaximumWidth(120)
+        self.dc_volt_edit.returnPressed.connect(self.apply_dc_settings_to_selected)
         self.refdes_table = DropRefDesTable(0, 2)
         self.refdes_table.setHorizontalHeaderLabels(["RefDes Name", "Activation Status"])
         self.refdes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -350,6 +389,21 @@ class MainWindow(QMainWindow):
         self.import_refdes_status_action = QAction("Import RefDes Excel", self)
         self.import_refdes_status_action.setEnabled(False)
         self.import_refdes_status_action.triggered.connect(self.import_refdes_dialog)
+        self.apply_dc_action = QAction("Apply DC Setting to Selected", self)
+        self.apply_dc_action.setToolTip("Queue the Pairing P/G NET and Volt (V) fields for the selected channels")
+        self.apply_dc_action.setEnabled(False)
+        self.apply_dc_action.triggered.connect(self.apply_dc_settings_to_selected)
+        self.auto_dc_action = QAction("Auto-fill Selected (Volt from NET name)", self)
+        self.auto_dc_action.setToolTip("Queue the Pairing P/G NET with a voltage read from each NET name (1 V when unrecognized)")
+        self.auto_dc_action.setEnabled(False)
+        self.auto_dc_action.triggered.connect(self.auto_fill_dc_selected)
+        self.revert_dc_action = QAction("Revert Selected DC Setting", self)
+        self.revert_dc_action.setEnabled(False)
+        self.revert_dc_action.triggered.connect(self.revert_dc_selected)
+        self.clear_dc_action = QAction("Clear Pending DC Settings", self)
+        self.clear_dc_action.setEnabled(False)
+        self.clear_dc_action.triggered.connect(self.clear_dc_settings)
+
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self.load_action)
@@ -368,6 +422,11 @@ class MainWindow(QMainWindow):
         self.clear_pending_ports_action = QAction("Clear Pending Ports", self)
         self.clear_pending_ports_action.triggered.connect(self.clear_pending_ports)
         port_menu.addAction(self.clear_pending_ports_action)
+        dc_menu = self.menuBar().addMenu("DC")
+        dc_menu.addAction(self.apply_dc_action)
+        dc_menu.addAction(self.auto_dc_action)
+        dc_menu.addAction(self.revert_dc_action)
+        dc_menu.addAction(self.clear_dc_action)
         self.undo_component_change_action = QAction("Undo Component Change", self)
         self.undo_component_change_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.undo_component_change_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
@@ -382,8 +441,12 @@ class MainWindow(QMainWindow):
         self.port_workspace_action = QAction("Port Generation", self)
         self.port_workspace_action.setCheckable(True)
         self.port_workspace_action.triggered.connect(lambda _checked=False: self._show_workspace(1))
+        self.dc_workspace_action = QAction("DC Setting", self)
+        self.dc_workspace_action.setCheckable(True)
+        self.dc_workspace_action.triggered.connect(lambda _checked=False: self._show_workspace(2))
         view_menu.addAction(self.model_workspace_action)
         view_menu.addAction(self.port_workspace_action)
+        view_menu.addAction(self.dc_workspace_action)
         self.help_menu = self.menuBar().addMenu("Help")
         formats_action = QAction("Input File Formats", self)
         formats_action.triggered.connect(self.show_input_file_formats)
@@ -492,10 +555,55 @@ class MainWindow(QMainWindow):
         port_splitter.setStretchFactor(1, 1)
         port_layout.addWidget(port_splitter, 1)
 
+        dc_root = QWidget()
+        dc_layout = QVBoxLayout(dc_root)
+        dc_layout.addWidget(QLabel("DC Setting (PowerDC Voltage / Pairing P/G NET per Power NET channel)"))
+        self.dc_hint = QLabel(
+            "Select one or more channels (Ctrl/Shift-click or Ctrl+A on the filtered list), set Pairing P/G NET and "
+            "Volt (V), then Apply. Applying to an inactive NET also activates it for simulation. "
+            "Auto-fill reads the voltage from the NET name (VDD085 → 0.85 V, VDD18 → 1.8 V, 1V8 / 0P75 styles; 1 V when unrecognized)."
+        )
+        self.dc_hint.setWordWrap(True)
+        dc_layout.addWidget(self.dc_hint)
+        dc_layout.addWidget(self.dc_net_filter)
+        dc_layout.addWidget(self.dc_summary)
+        dc_layout.addWidget(self.dc_table, 1)
+        dc_editor = QHBoxLayout()
+        dc_editor.addWidget(QLabel("Pairing P/G NET"))
+        dc_editor.addWidget(self.dc_ground_combo, 1)
+        dc_editor.addWidget(QLabel("Volt (V)"))
+        dc_editor.addWidget(self.dc_volt_edit)
+        self.dc_apply_button = QPushButton("Apply to Selected")
+        self.dc_apply_button.setEnabled(False)
+        self.dc_apply_button.clicked.connect(self.apply_dc_settings_to_selected)
+        self.dc_auto_button = QPushButton("Auto-fill Selected")
+        self.dc_auto_button.setToolTip("Queue the Pairing P/G NET with a voltage read from each NET name (1 V when unrecognized)")
+        self.dc_auto_button.setEnabled(False)
+        self.dc_auto_button.clicked.connect(self.auto_fill_dc_selected)
+        self.dc_revert_button = QPushButton("Revert Selected")
+        self.dc_revert_button.setEnabled(False)
+        self.dc_revert_button.clicked.connect(self.revert_dc_selected)
+        dc_editor.addWidget(self.dc_apply_button)
+        dc_editor.addWidget(self.dc_auto_button)
+        dc_editor.addWidget(self.dc_revert_button)
+        dc_layout.addLayout(dc_editor)
+        dc_buttons = QHBoxLayout()
+        self.dc_clear_button = QPushButton("Clear Pending")
+        self.dc_clear_button.setEnabled(False)
+        self.dc_clear_button.clicked.connect(self.clear_dc_settings)
+        self.dc_export_button = QPushButton("Export New SPD")
+        self.dc_export_button.setEnabled(False)
+        self.dc_export_button.clicked.connect(self.export_spd_dialog)
+        dc_buttons.addWidget(self.dc_clear_button)
+        dc_buttons.addWidget(self.dc_export_button)
+        dc_buttons.addStretch(1)
+        dc_layout.addLayout(dc_buttons)
+
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.workspace_tabs.addTab(model_root, "Model & RefDes")
         self.workspace_tabs.addTab(port_root, "Port Generation")
+        self.workspace_tabs.addTab(dc_root, "DC Setting")
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -512,7 +620,8 @@ class MainWindow(QMainWindow):
         self._filter_shortcut.activated.connect(self._focus_workspace_filter)
 
     def _focus_workspace_filter(self) -> None:
-        search = self.power_net_filter if self.workspace_tabs.currentIndex() == 1 else self.component_filter
+        searches = {1: self.power_net_filter, 2: self.dc_net_filter}
+        search = searches.get(self.workspace_tabs.currentIndex(), self.component_filter)
         search.setFocus()
         search.selectAll()
 
@@ -533,15 +642,20 @@ class MainWindow(QMainWindow):
             self.power_net_list,
             self.port_refdes_table,
             self.port_management_table,
+            self.dc_table,
+            self.dc_ground_combo,
+            self.dc_volt_edit,
         ):
             widget.setEnabled(not busy)
         if hasattr(self, "clear_pending_ports_action") and self.clear_pending_ports_action is not None:
             self.clear_pending_ports_action.setEnabled(not busy and bool(self.pending_port_requests))
         self._update_generate_port_state()
+        self._update_dc_state()
 
     def _workspace_changed(self, index: int) -> None:
         self.model_workspace_action.setChecked(index == 0)
         self.port_workspace_action.setChecked(index == 1)
+        self.dc_workspace_action.setChecked(index == 2)
 
     def _show_workspace(self, index: int) -> None:
         self.workspace_tabs.setCurrentIndex(index)
@@ -769,6 +883,172 @@ class MainWindow(QMainWindow):
         self._update_port_readiness()
         self._update_generate_port_state()
 
+    # ---- DC Setting workspace -------------------------------------------------
+
+    def _set_dc_ground_options(self, ground_nets, net_names) -> None:
+        self.dc_ground_combo.blockSignals(True)
+        self.dc_ground_combo.clear()
+        self.dc_ground_combo.addItems([str(name) for name in ground_nets])
+        default = "DGND" if "DGND" in net_names else (str(ground_nets[0]) if ground_nets else "")
+        self.dc_ground_combo.setCurrentText(default)
+        self.dc_ground_combo.blockSignals(False)
+
+    def _populate_dc_table(self) -> None:
+        keep = set(self._selected_dc_nets(include_hidden=True))
+        sorting_enabled = self.dc_table.isSortingEnabled()
+        self.dc_table.setSortingEnabled(False)
+        self.dc_table.setRowCount(0)
+        records = sorted(self.inventory.power_net_records, key=lambda record: record.net_name)
+        self.dc_table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            pending = self.dc_settings.get(record.net_name)
+            if pending is not None:
+                ground, volt, status = pending.ground_net, format_voltage(pending.voltage), "Pending"
+                active = "Yes" if record.selected else "No → Yes"
+            else:
+                ground, volt = record.ground_net, record.voltage
+                status = "Existing" if ground or volt else ""
+                active = "Yes" if record.selected else "No"
+            for column, value in enumerate((record.net_name, active, ground, volt, status)):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, record.net_name)
+                if pending is not None:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setForeground(self._modified_color())
+                self.dc_table.setItem(row, column, item)
+        self.dc_table.setSortingEnabled(sorting_enabled)
+        if keep:
+            selection = self.dc_table.selectionModel()
+            for row in range(self.dc_table.rowCount()):
+                item = self.dc_table.item(row, 0)
+                if item is not None and item.data(Qt.ItemDataRole.UserRole) in keep:
+                    selection.select(
+                        self.dc_table.model().index(row, 0),
+                        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+        self._apply_dc_filter(self.dc_net_filter.text())
+
+    def _apply_dc_filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        for row in range(self.dc_table.rowCount()):
+            item = self.dc_table.item(row, 0)
+            name = str(item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
+            hidden = bool(needle) and needle not in name.casefold()
+            self.dc_table.setRowHidden(row, hidden)
+            if hidden and item is not None and item.isSelected():
+                self.dc_table.selectionModel().select(
+                    self.dc_table.model().index(row, 0),
+                    QItemSelectionModel.SelectionFlag.Deselect | QItemSelectionModel.SelectionFlag.Rows,
+                )
+        self._update_dc_state()
+
+    def _selected_dc_nets(self, include_hidden: bool = False) -> list[str]:
+        names: list[str] = []
+        for index in self.dc_table.selectionModel().selectedRows(0):
+            if not include_hidden and self.dc_table.isRowHidden(index.row()):
+                continue
+            item = self.dc_table.item(index.row(), 0)
+            if item is not None:
+                names.append(str(item.data(Qt.ItemDataRole.UserRole) or item.text()))
+        return sorted(names)
+
+    def _update_dc_state(self) -> None:
+        if not hasattr(self, "dc_apply_button"):
+            return
+        total = self.dc_table.rowCount()
+        visible = sum(1 for row in range(total) if not self.dc_table.isRowHidden(row))
+        names = self._selected_dc_nets()
+        self.dc_summary.setText(
+            f"Power NETs: {visible}/{total} shown; {len(names)} selected; {len(self.dc_settings)} pending"
+        )
+        can_edit = not self._busy and self.spd_path is not None and bool(names)
+        for widget in (self.dc_apply_button, self.dc_auto_button, self.apply_dc_action, self.auto_dc_action):
+            widget.setEnabled(can_edit)
+        can_revert = can_edit and any(name in self.dc_settings for name in names)
+        self.dc_revert_button.setEnabled(can_revert)
+        self.revert_dc_action.setEnabled(can_revert)
+        has_pending = not self._busy and bool(self.dc_settings)
+        self.dc_clear_button.setEnabled(has_pending)
+        self.clear_dc_action.setEnabled(has_pending)
+        self.dc_export_button.setEnabled(has_pending)
+
+    def apply_dc_settings_to_selected(self) -> None:
+        text = self.dc_volt_edit.text().strip()
+        try:
+            voltage = float(text)
+        except ValueError:
+            voltage = math.nan
+        if not math.isfinite(voltage):
+            QMessageBox.warning(self, "DC Setting", f"Volt (V) must be a number: {text or '(empty)'}")
+            return
+        self._queue_dc_settings(self._selected_dc_nets(), lambda _name: voltage)
+
+    def auto_fill_dc_selected(self) -> None:
+        self._queue_dc_settings(self._selected_dc_nets(), lambda name: infer_voltage(name) or 1.0)
+
+    def _queue_dc_settings(self, names: list[str], voltage_for) -> None:
+        if not names or self._busy:
+            return
+        ground = self.dc_ground_combo.currentText().strip()
+        if not ground or ground not in self.inventory.net_names:
+            QMessageBox.warning(self, "DC Setting", f"Pairing P/G NET must be an active NET in .NetList: {ground or '(empty)'}")
+            return
+        records = {record.net_name: record for record in self.inventory.power_net_records}
+        queued: list[str] = []
+        for name in names:
+            record = records.get(name)
+            if record is None or name == ground:
+                continue
+            voltage = float(voltage_for(name))
+            if record.selected and record.ground_net == ground and record.voltage == format_voltage(voltage):
+                self.dc_settings.pop(name, None)  # identical to the file; nothing to write
+            else:
+                self.dc_settings[name] = DcSetting(net_name=name, voltage=voltage, ground_net=ground)
+            queued.append(f"{name}={format_voltage(voltage)}V")
+        skipped = len(names) - len(queued)
+        message = f"Queued DC setting for {len(queued)} channel(s) with {ground}: {', '.join(queued)}"
+        if skipped:
+            message += f" ({skipped} skipped: same as Pairing NET)"
+        self._append_status(message)
+        self._populate_dc_table()
+
+    def revert_dc_selected(self) -> None:
+        names = [name for name in self._selected_dc_nets() if name in self.dc_settings]
+        for name in names:
+            del self.dc_settings[name]
+        if names:
+            self._append_status(f"Reverted {len(names)} pending DC setting(s).")
+        self._populate_dc_table()
+
+    def clear_dc_settings(self) -> None:
+        count = len(self.dc_settings)
+        self.dc_settings.clear()
+        if count:
+            self._append_status(f"Cleared {count} pending DC setting(s).")
+        self._populate_dc_table()
+
+    def _show_dc_context_menu(self, position) -> None:
+        row = self.dc_table.indexAt(position).row()
+        if row < 0 or self._busy:
+            return
+        if not self.dc_table.selectionModel().isRowSelected(row, self.dc_table.rootIndex()):
+            self.dc_table.clearSelection()
+            self.dc_table.selectRow(row)
+        menu = QMenu(self.dc_table)
+        apply_action = menu.addAction(f"Apply DC Setting ({len(self._selected_dc_nets())} NETs)")
+        auto_action = menu.addAction("Auto-fill Volt from NET name")
+        revert_action = menu.addAction("Revert Selected")
+        selected = menu.exec(self.dc_table.viewport().mapToGlobal(position))
+        if selected is apply_action:
+            self.apply_dc_settings_to_selected()
+        elif selected is auto_action:
+            self.auto_fill_dc_selected()
+        elif selected is revert_action:
+            self.revert_dc_selected()
+
     def _clear_scan_refs(self) -> None:
         if self.sender() is self._scan_thread:
             self._scan_thread = None
@@ -849,6 +1129,7 @@ class MainWindow(QMainWindow):
         self.pending_port_requests.clear()
         self.port_deletions.clear()
         self.port_enabled_changes.clear()
+        self.dc_settings.clear()
         self._show_validation("", error=False)
         self.status_log.clear()
         self.populate_components()
@@ -856,6 +1137,10 @@ class MainWindow(QMainWindow):
         self._populate_port_management_table()
         net_names = self._inventory_net_names(inventory)
         self._set_net_selectors(self._inventory_power_nets(inventory), net_names, self._inventory_ground_nets(inventory))
+        self.port_refdes_filter.clear()
+        self._set_dc_ground_options(self._inventory_ground_nets(inventory), net_names)
+        self.dc_net_filter.clear()
+        self._populate_dc_table()
         self._update_undo_component_change_action()
         if self.export_refdes_action is not None:
             self.export_refdes_action.setEnabled(bool(self.refdes_records))
@@ -982,7 +1267,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self._has_port_changes():
+        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self._has_port_changes() and not self.dc_settings:
             confirm = QMessageBox.question(
                 self,
                 "Export",
@@ -1077,6 +1362,7 @@ class MainWindow(QMainWindow):
             port_requests=list(self.pending_port_requests),
             port_deletions=sorted(self.port_deletions),
             port_enabled_changes=dict(self.port_enabled_changes),
+            dc_settings=[self.dc_settings[name] for name in sorted(self.dc_settings)],
             inventory=self.inventory,
         )
         self._export_worker.moveToThread(self._export_thread)
