@@ -10,7 +10,14 @@ from PySide6.QtWidgets import QApplication
 from spd_model_injector.core.spd import SpdInventory, VrmSinkRecord, VrmSinkSetting, scan_spd_inventory
 from spd_model_injector.ui.main_window import MainWindow
 from spd_model_injector.ui.workers import ExportWorker
-from test_vrm_sink_settings import _BOARD
+
+_BOARD = (
+    ".Port\n.EndPort\n.NetList\n\tDGND -> GroundNets\n.EndNetList\n"
+    '.VRM NominalVoltage = 0.85 SenseVoltage = 0.85 OutputCurrent = 1 Name = "VRM_LGA_VDD_A/0_DGND"\n.EndVRM\n'
+    '.VRM NominalVoltage = 1.8 SenseVoltage = 1.8 OutputCurrent = 1 Name = "VRM_LGA_VDD18/0_DGND"\n.EndVRM\n'
+    '.Sink NominalVoltage = 0.85 Current = 1 Model = 2 PFMode = 2 PinEqualCurrent = 1 Name = "SINK_SITE0_VDD_A/0_DGND"\n'
+    ".SinkCurrentSource\n.EndSinkCurrentSource\n.EndSink\n"
+)
 
 
 def _vrm(name: str, volt: str = "0.95") -> VrmSinkRecord:
@@ -89,6 +96,7 @@ def test_vrm_sink_filter_and_multi_select_apply_queue_visible_rows_only(tmp_path
     assert _row_texts(window, "VRM_LGA_ADC_VDD_CPU/0_DGND") == ["VRM", "VRM_LGA_ADC_VDD_CPU/0_DGND", "0.9", "0.95", "1", "", "", "", "", "Pending"]
     row = _row_of(window, "VRM_LGA_ADC_VDD_CPU/0_DGND")
     assert window.vrm_sink_table.item(row, 2).font().bold() and not window.vrm_sink_table.item(row, 3).font().bold()
+    assert window.vrm_sink_table.item(row, 2).toolTip() == "File value: 0.95" and window.vrm_sink_table.item(row, 3).toolTip() == ""
     assert window.vrm_sink_summary.text() == "VRM/Sink: 3/5 shown; 3 selected; 3 pending"
     assert window.vrm_sink_export_button.isEnabled() and window.vrm_sink_clear_button.isEnabled() and window.vrm_sink_revert_button.isEnabled()
     assert "Queued NominalVoltage = 0.9 for 3 VRM/Sink(s)" in window.status_log.toPlainText()
@@ -145,6 +153,30 @@ def test_vrm_sink_apply_rejects_bad_values_without_queueing(tmp_path: Path, monk
         "Current value must be a single unquoted token", "Current value must be a single unquoted token",
         "Current value must be a single unquoted token", "Current must be a number",
     ]
+
+
+def test_vrm_sink_apply_refuses_duplicate_names(tmp_path: Path, monkeypatch) -> None:
+    window = _window(tmp_path)
+    window.inventory = SpdInventory([], [], vrm_sink_records=(_vrm("VRM_DUP"), _vrm("VRM_DUP", "1.8"), _vrm("VRM_OK")))
+    window._populate_vrm_sink_table()
+    warnings: list[str] = []
+    monkeypatch.setattr("spd_model_injector.ui.main_window.QMessageBox.warning", lambda *args: warnings.append(args[2]))
+    window.vrm_sink_table.selectAll()
+    window.vrm_sink_property_combo.setCurrentText("NominalVoltage")
+    window.vrm_sink_value_edit.setText("1")
+    window.apply_vrm_sink_setting_to_selected()
+    assert not window.vrm_sink_settings
+    assert warnings == ["Duplicate names in the SPD cannot be edited unambiguously: VRM VRM_DUP, VRM VRM_DUP"]
+
+
+def test_vrm_sink_property_columns_sort_numerically(tmp_path: Path) -> None:
+    window = _window(tmp_path)
+    window.inventory = SpdInventory([], [], vrm_sink_records=(_sink("S_TEN", "10"), _sink("S_TWO", "2"), _sink("S_HALF", "0.5"), _vrm("V_NONE")))
+    window._populate_vrm_sink_table()
+    window.vrm_sink_table.horizontalHeader().setSortIndicator(2, Qt.SortOrder.AscendingOrder)
+    assert [window.vrm_sink_table.item(row, 2).text() for row in range(4)] == ["0.5", "0.95", "2", "10"]
+    window.vrm_sink_table.horizontalHeader().setSortIndicator(5, Qt.SortOrder.DescendingOrder)  # PFMode: "" for the VRM row sorts last
+    assert [window.vrm_sink_table.item(row, 5).text() for row in range(4)] == ["2", "2", "2", ""]
 
 
 def test_vrm_sink_context_menu_applies_to_clicked_row(tmp_path: Path, monkeypatch) -> None:

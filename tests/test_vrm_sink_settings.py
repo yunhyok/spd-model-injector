@@ -121,6 +121,21 @@ def test_write_vrm_sink_settings_rejects_duplicates_and_stale_headers(tmp_path: 
     assert not output.exists()
 
 
+def test_write_skips_keys_inside_quoted_values_and_accepts_indented_headers(tmp_path: Path) -> None:
+    header = '\t.Sink Name = "SINK Current = 9 X" NominalVoltage = 1 Current = 1\n'
+    source = _write(tmp_path / "quoted.spd", ".Port\n.EndPort\n" + header + ".EndSink\n")
+    inventory = scan_spd_inventory(source)
+    (record,) = inventory.vrm_sink_records
+    assert (record.kind, record.name, record.properties) == ("Sink", "SINK Current = 9 X", (("NominalVoltage", "1"), ("Current", "1")))
+    output = tmp_path / "quoted_out.spd"
+    write_spd_with_replacements(
+        source, output, [], {}, inventory=inventory,
+        vrm_sink_settings=[VrmSinkSetting("Sink", "SINK Current = 9 X", (("Current", "2"),))],
+    )
+    assert output.read_text(encoding="utf-8") == ".Port\n.EndPort\n" + header.replace("Current = 1\n", "Current = 2\n") + ".EndSink\n"
+
+
 def test_record_key_and_is_number() -> None:
     assert VrmSinkRecord("VRM", "X", (), 0, 1, ".VRM").key == ("VRM", "X")
-    assert [is_number(text) for text in ("0.85", "1", "-2e-3", "inf", "nan", "abc", "")] == [True, True, True, False, False, False, False]
+    assert [is_number(text) for text in ("0.85", "1", "-2e-3", "+.5", "5.")] == [True] * 5
+    assert not any(is_number(text) for text in ("inf", "nan", "abc", "", "1_0", "0x10", "\u0661", "1 "))

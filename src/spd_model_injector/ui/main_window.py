@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import csv
 from dataclasses import dataclass, replace
 import html
@@ -150,6 +151,16 @@ class DropRefDesTable(QTableWidget):
             event.acceptProposedAction()
             return
         super().dropEvent(event)
+
+
+class NumericAwareItem(QTableWidgetItem):
+    """Sorts numerically when both cells hold numbers, so ``10`` comes after ``2``."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        mine, theirs = self.text(), other.text()
+        if is_number(mine) and is_number(theirs):
+            return float(mine) < float(theirs)
+        return mine < theirs
 
 
 @dataclass(frozen=True)
@@ -1175,7 +1186,7 @@ class MainWindow(QMainWindow):
             cells = [record.kind, record.name, *(pending.get(prop, values.get(prop, "")) for prop in properties)]
             cells.append("Pending" if pending else "")
             for column, value in enumerate(cells):
-                item = QTableWidgetItem(value)
+                item = NumericAwareItem(value)
                 if column < 2:
                     item.setData(Qt.ItemDataRole.UserRole, value)
                 if pending and (column < 2 or column == status_column or properties[column - 2] in pending):
@@ -1183,6 +1194,8 @@ class MainWindow(QMainWindow):
                     font.setBold(True)
                     item.setFont(font)
                     item.setForeground(self._modified_color())
+                    if 2 <= column < status_column:
+                        item.setToolTip(f"File value: {values.get(properties[column - 2], '')}")
                 table.setItem(row, column, item)
         table.setSortingEnabled(sorting_enabled)
         if keep:
@@ -1262,6 +1275,13 @@ class MainWindow(QMainWindow):
         if not prop or not value or any(char.isspace() for char in value) or '"' in value:
             QMessageBox.warning(
                 self, "VRM/Sink Setting", f"{prop or 'Property'} value must be a single unquoted token: {value or '(empty)'}"
+            )
+            return
+        counts = Counter(record.key for record in self.inventory.vrm_sink_records)
+        duplicates = [f"{kind} {name}" for kind, name in keys if counts[(kind, name)] > 1]
+        if duplicates:
+            QMessageBox.warning(
+                self, "VRM/Sink Setting", "Duplicate names in the SPD cannot be edited unambiguously: " + ", ".join(duplicates)
             )
             return
         records = {record.key: record for record in self.inventory.vrm_sink_records}

@@ -480,18 +480,26 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
         nets = marker_offsets(data, b".NetList")
         end_nets = marker_offsets(data, b".EndNetList")
         vrm_sink_records: list[VrmSinkRecord] = []
-        for kind in ("VRM", "Sink"):
-            for offset in marker_offsets(data, f".{kind}".encode()):
+        for kind, marker in (("VRM", b".VRM"), ("Sink", b".Sink")):  # byte search: ~8x cheaper than a regex pass
+            pos = 0
+            while (pos := data.find(marker, pos)) >= 0:
+                offset, pos = pos, pos + len(marker)
+                line_start = data.rfind(b"\n", 0, offset) + 1
+                indented_only = line_start == offset or data[line_start:offset].isspace()
+                if not indented_only or data[pos:pos + 1] not in (b" ", b"\t"):
+                    continue  # .SinkCurrentSource, .EndVRM, text inside other lines
+                if any(block.block_start_offset <= offset < block.block_end_offset for block in blocks):
+                    continue
                 newline = data.find(b"\n", offset)
                 line_end = len(data) if newline < 0 else newline + 1
-                line = _strip_newline(bytes(data[offset:line_end]).decode("utf-8", errors="replace"))
+                line = _strip_newline(bytes(data[line_start:line_end]).decode("utf-8", errors="replace"))
                 properties = _header_properties(line)
                 name = next((value.strip('"') for key, value in properties if key.lower() == "name"), "")
                 if name:
                     vrm_sink_records.append(VrmSinkRecord(
                         kind=kind, name=name,
                         properties=tuple((key, value) for key, value in properties if key.lower() != "name"),
-                        line_start_offset=offset, line_end_offset=line_end, line=line,
+                        line_start_offset=line_start, line_end_offset=line_end, line=line,
                     ))
         marker_candidates = {
             match.start() for match in re.finditer(rb"(?im)^[ \t]*\.(?:End)?(?:Port|NetList)(?:[ \t\r\n]|$)", data)
@@ -635,7 +643,7 @@ def _validate_port_metadata(path: Path, inventory: SpdInventory) -> None:
                  "existing_port_keys", "port_records", "max_port_number", "ground_nets", "net_names", "power_nets",
                  "power_net_records", "vrm_sink_records"):
         if getattr(inventory, name) != fresh[name]:
-            raise ValueError("SPD metadata changed since scan; reload before exporting Port or DC changes.")
+            raise ValueError("SPD metadata changed since scan; reload before exporting Port, DC or VRM/Sink changes.")
 
 
 _VOLTAGE_NAME_PATTERNS = (
@@ -677,6 +685,7 @@ def _apply_dc_setting(line: str, voltage: float, ground_net: str) -> str:
 
 
 _PROPERTY_RE = re.compile(r'(\w+)\s*=\s*("[^"]*"|\S+)')
+_NUMBER_RE = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 
 
 def _header_properties(line: str) -> list[tuple[str, str]]:
@@ -685,17 +694,20 @@ def _header_properties(line: str) -> list[tuple[str, str]]:
 
 
 def is_number(text: str) -> bool:
-    try:
-        return math.isfinite(float(text))
-    except (TypeError, ValueError):
-        return False
+    """Plain decimal or scientific token as PowerDC writes it; rejects Python-only spellings such as ``1_0``."""
+    return _NUMBER_RE.fullmatch(text) is not None
 
 
 def _apply_vrm_sink_setting(line: str, changes: Mapping[str, str]) -> str:
     """Replace only the value token of each changed ``Key = Value`` pair; everything else stays byte-identical."""
-    for key, value in changes.items():
-        line = re.sub(rf"(\b{re.escape(key)}\s*=\s*)(?:\"[^\"]*\"|\S+)", lambda match: match.group(1) + value, line, count=1)
-    return line
+    pieces: list[str] = []
+    cursor = 0
+    for match in _PROPERTY_RE.finditer(line):  # walks the pairs in order, so keys inside quoted values are skipped
+        if match.group(1) in changes:
+            pieces.append(line[cursor:match.start(2)] + changes[match.group(1)])
+            cursor = match.end(2)
+    pieces.append(line[cursor:])
+    return "".join(pieces)
 
 
 def _port_enabled_from_header(header: str) -> bool:
