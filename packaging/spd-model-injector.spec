@@ -17,7 +17,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # openpyxl optionally imports these (guarded try/except); the app never needs them.
+    # Excluding them also drops their transitive baggage (yaml, psutil, pywin32, bs4).
+    excludes=["numpy", "PIL", "lxml"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

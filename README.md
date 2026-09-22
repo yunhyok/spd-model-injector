@@ -21,13 +21,14 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Select multiple Power channels, queue PowerSI ports for Component→RefDes tree rows, and merge every matching Package.Node pin into each terminal.
 - Inspect existing and pending Ports, change activation with checkboxes, and queue Port deletion or restoration before export.
 - Queue PowerDC DC settings (`Voltage` and pairing `GroundNet`) per Power NET channel, with search, multi-selection, and voltage auto-fill from the NET name.
+- Change the properties of VRMs and Sinks already defined in the SPD (`NominalVoltage`, `SenseVoltage`, `OutputCurrent`, `Current`, `Model`, ...) for many rows at once, with search and multi-selection.
 - Write output as UTF-8 with LF line endings.
 
 ## Generate Port
 
-The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `DC`, `View`, and `Help`. The top tabs provide separate `Model & RefDes`, `Port Generation`, and `DC Setting` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
+The menu bar is organized as `File`, `Edit`, `Model`, `Port`, `DC`, `VRM/Sink`, `View`, and `Help`. The top tabs provide separate `Model & RefDes`, `Port Generation`, `DC Setting`, and `VRM/Sink Setting` workspaces. The Port workspace is split left/right: select one or more Power channels on the left, expand the Component→RefDes tree, select the required RefDes rows, and choose `Generate Port`. `DGND` is used automatically when present; only files without `DGND` prompt for an exact reference NET. The right side lists existing and pending Ports with pin counts, activation checkboxes, and deletion/restore controls. `Export New SPD` applies the queued changes without modifying the source file.
 
-In 0.6.0, `Ctrl+F` focuses the component search in `Model & RefDes`, or the Power NET search in `Port Generation` (and, since 0.7.0, the channel search in `DC Setting`). Power NET search is case-insensitive and filters the displayed list without changing checked targets. The summary shows how many NETs are visible and how many are checked, including hidden items. Clear the search to see all NETs again; loading a new SPD resets the search. The separate RefDes instance search remains available below it.
+In 0.6.0, `Ctrl+F` focuses the component search in `Model & RefDes`, or the Power NET search in `Port Generation` (and, since 0.7.0, the channel search in `DC Setting`; since 0.8.0, the VRM/Sink search in `VRM/Sink Setting`). Power NET search is case-insensitive and filters the displayed list without changing checked targets. The summary shows how many NETs are visible and how many are checked, including hidden items. Clear the search to see all NETs again; loading a new SPD resets the search. The separate RefDes instance search remains available below it.
 
 Files without Ports are supported: export creates a `.Port`/`.EndPort` section at the reserved Port location, or before the valid `.NetList` section if no reserved location exists. Malformed or multiple Port sections remain blocked. Select the SITE0/SITE1 child rows under DUT after checking their Power NETs.
 
@@ -42,6 +43,19 @@ On export each queued NET line gains `Voltage = <V> GroundNet = <NET>`, replacin
 ```
 
 Applying a setting to an inactive (`::Unselected`) NET also activates it, because PowerDC only simulates active nets. The pairing NET must be an active NET in `.NetList`. Nothing else in the file is touched; the NetList is neither reordered nor re-flagged. Files saved by PowerDC (`||DropShape` flags on NET and group tokens) are now parsed correctly, so their Power NETs and `DGND` are available in `Port Generation` and `DC Setting`.
+
+## VRM/Sink Setting (0.8.0)
+
+The `VRM/Sink Setting` tab edits the VRMs and Sinks that PowerDC has already saved into the SPD. Every `.VRM` / `.Sink` block is listed with its type, name, and the `Key = Value` properties found on its header line (`NominalVoltage`, `SenseVoltage`, `OutputCurrent` for VRMs; `NominalVoltage`, `Current`, `Model`, `PFMode`, `PinEqualCurrent` for Sinks). Search filters by type or name, and rows support multi-selection (`Ctrl`/`Shift`-click, or `Ctrl+A` on the filtered list). Pick a `Property`, enter the new `Value`, then `Apply to Selected` to queue it for every selected visible row; rows that do not carry the chosen property are skipped, and values identical to the file are not queued. Repeat with another property to change several at once. Pending rows are highlighted and can be reverted or cleared before export.
+
+On export only the value token of each queued property is replaced on the header line; the pin mappings inside the block and everything else in the file are untouched:
+
+```text
+.VRM NominalVoltage = 0.9 SenseVoltage = 0.9 OutputCurrent = 1 Name = "VRM_LGA_ADC_VDD_CPU/0_DGND"
+.Sink NominalVoltage = 0.9 Current = 2.5 Model = 2 PFMode = 2 PinEqualCurrent = 1 Name = "SINK_SITE1_ADC_VDD_CPU/1_DGND"
+```
+
+The tab only changes properties that already exist on the header; it does not create VRMs or Sinks. Use PowerDC to define them first, save the SPD, and load that file here.
 
 ## Export and workspace safety (0.5.0)
 

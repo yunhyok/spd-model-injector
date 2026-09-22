@@ -4,7 +4,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from spd_model_injector.core.spd import DcSetting, PartialCktBlock, PortRequest, RefDesRecord, SpdInventory, scan_spd_inventory, write_spd_with_replacements
+from spd_model_injector.core.spd import (
+    DcSetting,
+    PartialCktBlock,
+    PortRequest,
+    RefDesRecord,
+    SpdInventory,
+    VrmSinkSetting,
+    scan_spd_inventory,
+    write_spd_with_replacements,
+)
 
 
 class ScanWorker(QObject):
@@ -43,6 +52,7 @@ class ExportWorker(QObject):
         port_deletions: list[str] | None = None,
         port_enabled_changes: dict[str, bool] | None = None,
         dc_settings: list[DcSetting] | None = None,
+        vrm_sink_settings: list[VrmSinkSetting] | None = None,
         inventory: SpdInventory | None = None,
     ) -> None:
         super().__init__()
@@ -59,6 +69,7 @@ class ExportWorker(QObject):
         self.port_deletions = list(port_deletions or [])
         self.port_enabled_changes = dict(port_enabled_changes or {})
         self.dc_settings = list(dc_settings or [])
+        self.vrm_sink_settings = list(vrm_sink_settings or [])
         self.inventory = inventory
 
     @Slot()
@@ -78,6 +89,7 @@ class ExportWorker(QObject):
                 port_deletions=self.port_deletions,
                 port_enabled_changes=self.port_enabled_changes,
                 dc_settings=self.dc_settings,
+                vrm_sink_settings=self.vrm_sink_settings,
                 inventory=self.inventory,
             )
             self.finished.emit(str(self.output_path))
