@@ -2,7 +2,7 @@
 #define MyAppPublisher "spd-model-injector"
 #define MyAppExeName "SPD Model Injector.exe"
 #ifndef MyAppVersion
-#define MyAppVersion "0.8.0"
+#define MyAppVersion "0.8.1"
 #endif
 
 [Setup]
@@ -27,6 +27,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[InstallDelete]
+; The PyInstaller bundle changes between versions. Packages left behind by an upgrade (for example a numpy
+; folder without __init__.py once numpy was dropped in 0.8.0) are imported as namespace packages and crash
+; the app at startup, so wipe the bundle directory before copying the new one.
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 Source: "..\dist\SPD Model Injector\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
