@@ -104,6 +104,12 @@ Build the executable:
 
 The script builds with PyInstaller. If Inno Setup's `iscc` command is installed, it also creates a setup executable.
 
+The application icon (a SPICE model being injected into a PowerSI board) is drawn in `packaging/icon.svg`. After editing it, regenerate the shipped `app.ico`/`app.png` with:
+
+```powershell
+python scripts/make_icon.py
+```
+
 ## Repository Safety
 
 Large board files and vendor model files can contain sensitive design data, so `*.spd` and `*.mod` are ignored by default. Keep sample boards outside Git history and attach release artifacts through GitHub Releases instead.

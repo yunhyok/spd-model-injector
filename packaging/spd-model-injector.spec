@@ -1,13 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from pathlib import Path
 
 block_cipher = None
+APP_ICON = os.path.join(SPECPATH, "..", "src", "spd_model_injector", "ui", "app.ico")
 
 a = Analysis(
     ["../src/spd_model_injector/app.py"],
     pathex=["..", "../src"],
     binaries=[],
-    datas=[],
+    datas=[
+        ("../src/spd_model_injector/ui/app.ico", "spd_model_injector/ui"),
+        ("../src/spd_model_injector/ui/app.png", "spd_model_injector/ui"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -36,6 +41,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon=APP_ICON,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

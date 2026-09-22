@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- SPD Model Injector: a SPICE model (capacitor chip) injected down into a PowerSI board. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b4470"/>
+      <stop offset="1" stop-color="#0a2038"/>
+    </linearGradient>
+    <linearGradient id="board" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#36c785"/>
+      <stop offset="1" stop-color="#1a8c58"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe08a"/>
+      <stop offset="1" stop-color="#f4a021"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="52" fill="url(#tile)"/>
+
+  <!-- board -->
+  <rect x="30" y="136" width="196" height="90" rx="14" fill="url(#board)"/>
+  <rect x="30" y="212" width="196" height="14" rx="7" fill="#0a2038" opacity="0.18"/>
+
+  <!-- copper traces and vias -->
+  <g fill="none" stroke="#ffe3a6" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M46 204 H84 L100 188 H156 L172 204 H210"/>
+    <path d="M46 158 H78"/>
+    <path d="M178 158 H210"/>
+  </g>
+  <g fill="#ffe3a6">
+    <circle cx="46" cy="204" r="8"/><circle cx="210" cy="204" r="8"/>
+    <circle cx="46" cy="158" r="8"/><circle cx="210" cy="158" r="8"/>
+  </g>
+  <g fill="#0a2038">
+    <circle cx="46" cy="204" r="3"/><circle cx="210" cy="204" r="3"/>
+    <circle cx="46" cy="158" r="3"/><circle cx="210" cy="158" r="3"/>
+  </g>
+
+  <!-- footprint the model lands in -->
+  <rect x="100" y="150" width="56" height="56" rx="8" fill="#08213a" opacity="0.55"/>
+  <rect x="100" y="150" width="56" height="56" rx="8" fill="none" stroke="#ffe3a6" stroke-width="3" opacity="0.85"/>
+
+  <!-- injection arrow -->
+  <path d="M112 60 H144 V122 H186 L128 188 L70 122 H112 Z"
+        fill="url(#arrow)" stroke="#08213a" stroke-width="6" stroke-linejoin="round" stroke-opacity="0.55"/>
+
+  <!-- the SPICE model being injected (capacitor symbol on a chip) -->
+  <rect x="90" y="26" width="76" height="46" rx="11" fill="#f8fafc" stroke="#08213a" stroke-width="4" stroke-opacity="0.35"/>
+  <g fill="none" stroke="#10375c" stroke-width="6" stroke-linecap="round">
+    <path d="M102 49 H118"/>
+    <path d="M119 35 V63"/>
+    <path d="M137 35 V63"/>
+    <path d="M138 49 H154"/>
+  </g>
+</svg>
