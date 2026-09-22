@@ -306,8 +306,6 @@ class MainWindow(QMainWindow):
         self.dc_table.horizontalHeader().resizeSection(2, 180)
         self.dc_table.horizontalHeader().resizeSection(3, 100)
         self.dc_table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-        # Sorting moves items between rows while hidden flags stay by row index; re-filter after each sort.
-        self.dc_table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: self._apply_dc_filter(self.dc_net_filter.text()))
         self.dc_ground_combo = QComboBox()
         self.dc_ground_combo.setEditable(True)
         self.dc_ground_combo.setToolTip("Ground NET paired with the selected power channels (DGND when available)")
@@ -990,7 +988,10 @@ class MainWindow(QMainWindow):
         self._queue_dc_settings(self._selected_dc_nets(), lambda name: infer_voltage(name) or 1.0)
 
     def _queue_dc_settings(self, names: list[str], voltage_for) -> None:
-        if not names or self._busy:
+        if self._busy:
+            return
+        if not names:
+            self._append_status("Select one or more channels before applying a DC setting.")
             return
         ground = self.dc_ground_combo.currentText().strip()
         if not ground or ground not in self.inventory.net_names:
@@ -998,18 +999,22 @@ class MainWindow(QMainWindow):
             return
         records = {record.net_name: record for record in self.inventory.power_net_records}
         queued: list[str] = []
+        unchanged = skipped = 0
         for name in names:
             record = records.get(name)
             if record is None or name == ground:
+                skipped += 1
                 continue
             voltage = float(voltage_for(name))
             if record.selected and record.ground_net == ground and record.voltage == format_voltage(voltage):
                 self.dc_settings.pop(name, None)  # identical to the file; nothing to write
-            else:
-                self.dc_settings[name] = DcSetting(net_name=name, voltage=voltage, ground_net=ground)
+                unchanged += 1
+                continue
+            self.dc_settings[name] = DcSetting(net_name=name, voltage=voltage, ground_net=ground)
             queued.append(f"{name}={format_voltage(voltage)}V")
-        skipped = len(names) - len(queued)
-        message = f"Queued DC setting for {len(queued)} channel(s) with {ground}: {', '.join(queued)}"
+        message = f"Queued DC setting for {len(queued)} channel(s) with {ground}: {', '.join(queued) or '-'}"
+        if unchanged:
+            message += f" ({unchanged} already in the file)"
         if skipped:
             message += f" ({skipped} skipped: same as Pairing NET)"
         self._append_status(message)
@@ -1136,8 +1141,8 @@ class MainWindow(QMainWindow):
         self._populate_port_refdes_table()
         self._populate_port_management_table()
         net_names = self._inventory_net_names(inventory)
-        self._set_net_selectors(self._inventory_power_nets(inventory), net_names, self._inventory_ground_nets(inventory))
         self.port_refdes_filter.clear()
+        self._set_net_selectors(self._inventory_power_nets(inventory), net_names, self._inventory_ground_nets(inventory))
         self._set_dc_ground_options(self._inventory_ground_nets(inventory), net_names)
         self.dc_net_filter.clear()
         self._populate_dc_table()

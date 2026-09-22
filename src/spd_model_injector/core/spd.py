@@ -593,7 +593,7 @@ def _validate_port_metadata(path: Path, inventory: SpdInventory) -> None:
                  "existing_port_keys", "port_records", "max_port_number", "ground_nets", "net_names", "power_nets",
                  "power_net_records"):
         if getattr(inventory, name) != fresh[name]:
-            raise ValueError("SPD metadata changed since scan; reload before changing Ports.")
+            raise ValueError("SPD metadata changed since scan; reload before exporting Port or DC changes.")
 
 
 _VOLTAGE_NAME_PATTERNS = (

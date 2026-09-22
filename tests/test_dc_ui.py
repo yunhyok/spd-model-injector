@@ -96,13 +96,19 @@ def test_dc_filter_and_multi_select_apply_queue_settings_for_visible_rows_only(t
     assert not window.dc_export_button.isEnabled()
 
 
-def test_dc_sorting_keeps_filter_applied_to_matching_rows(tmp_path: Path) -> None:
+def test_dc_sorting_keeps_filter_and_selection_on_matching_rows(tmp_path: Path) -> None:
     window = _dc_window(tmp_path)
-    window.dc_net_filter.setText("GPU")
-    window.dc_table.sortItems(0, Qt.SortOrder.DescendingOrder)
-    window.dc_table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.DescendingOrder)
-    visible = [window.dc_table.item(row, 0).text() for row in range(window.dc_table.rowCount()) if not window.dc_table.isRowHidden(row)]
-    assert visible == ["ADC_VDD_GPU/0"]
+    window.dc_net_filter.setText("TRIP0")
+    window.dc_table.selectAll()
+    header = window.dc_table.horizontalHeader()
+    orders: dict[tuple[int, Qt.SortOrder], list[str]] = {}
+    for column, order in ((0, Qt.SortOrder.DescendingOrder), (4, Qt.SortOrder.AscendingOrder), (0, Qt.SortOrder.AscendingOrder)):
+        header.setSortIndicator(column, order)  # header click path: the view sorts in response to the indicator change
+        visible = [window.dc_table.item(row, 0).text() for row in range(window.dc_table.rowCount()) if not window.dc_table.isRowHidden(row)]
+        assert sorted(visible) == ["ADC_VDDI_TRIP0/0", "ADC_VDDI_TRIP0/1"]
+        assert window._selected_dc_nets() == ["ADC_VDDI_TRIP0/0", "ADC_VDDI_TRIP0/1"]
+        orders[(column, order)] = visible
+    assert orders[(0, Qt.SortOrder.DescendingOrder)] == list(reversed(orders[(0, Qt.SortOrder.AscendingOrder)]))
 
 
 def test_dc_auto_fill_reads_voltage_from_net_names_and_skips_unchanged_rows(tmp_path: Path) -> None:
@@ -114,6 +120,12 @@ def test_dc_auto_fill_reads_voltage_from_net_names_and_skips_unchanged_rows(tmp_
     }
     assert "ADC_VDD085_DCPHY0/0" not in window.dc_settings  # already 0.85 / DGND in the file
     assert _row_texts(window, "ADC_VDD085_DCPHY0/0")[4] == "Existing"
+    assert "Queued DC setting for 4 channel(s) with DGND" in window.status_log.toPlainText()
+    assert "(1 already in the file)" in window.status_log.toPlainText()
+    window.dc_table.clearSelection()
+    window.dc_volt_edit.setText("0.9")
+    window.dc_volt_edit.returnPressed.emit()
+    assert "Select one or more channels" in window.status_log.toPlainText()
 
 
 def test_dc_apply_rejects_bad_voltage_or_unknown_ground_without_queueing(tmp_path: Path, monkeypatch) -> None:
