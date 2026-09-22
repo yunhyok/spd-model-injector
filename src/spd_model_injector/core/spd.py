@@ -130,6 +130,31 @@ class DcSetting:
 
 
 @dataclass(frozen=True)
+class VrmSinkRecord:
+    """One ``.VRM`` / ``.Sink`` header line and its ``Key = Value`` properties (``Name`` excluded)."""
+
+    kind: str
+    name: str
+    properties: tuple[tuple[str, str], ...]
+    line_start_offset: int
+    line_end_offset: int
+    line: str
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.kind, self.name)
+
+
+@dataclass(frozen=True)
+class VrmSinkSetting:
+    """New values queued by the UI for properties already present on one ``.VRM`` / ``.Sink`` header."""
+
+    kind: str
+    name: str
+    changes: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class SpdInventory:
     blocks: list[PartialCktBlock]
     refdes_records: list[RefDesRecord]
@@ -143,6 +168,7 @@ class SpdInventory:
     net_names: tuple[str, ...] = ()
     power_nets: tuple[str, ...] = ()
     power_net_records: tuple[PowerNetRecord, ...] = ()
+    vrm_sink_records: tuple[VrmSinkRecord, ...] = ()
     source_signature: tuple[int, int, int, int] | None = None
     refdes_by_component: dict[str, list[RefDesRecord]] = field(init=False)
 
@@ -432,7 +458,8 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
     if path.stat().st_size == 0:
         return {"port_section_start_offset": None, "port_section_end_offset": None,
                 "port_insertion_offset": None, "existing_port_keys": (), "max_port_number": 0,
-                "port_records": (), "ground_nets": (), "net_names": (), "power_nets": ()}
+                "port_records": (), "ground_nets": (), "net_names": (), "power_nets": (),
+                "power_net_records": (), "vrm_sink_records": ()}
     def marker_offsets(data: mmap.mmap, marker: bytes) -> list[int]:
         found: list[int] = []
         pos = 0
@@ -452,6 +479,20 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
         end_ports = marker_offsets(data, b".EndPort")
         nets = marker_offsets(data, b".NetList")
         end_nets = marker_offsets(data, b".EndNetList")
+        vrm_sink_records: list[VrmSinkRecord] = []
+        for kind in ("VRM", "Sink"):
+            for offset in marker_offsets(data, f".{kind}".encode()):
+                newline = data.find(b"\n", offset)
+                line_end = len(data) if newline < 0 else newline + 1
+                line = _strip_newline(bytes(data[offset:line_end]).decode("utf-8", errors="replace"))
+                properties = _header_properties(line)
+                name = next((value.strip('"') for key, value in properties if key.lower() == "name"), "")
+                if name:
+                    vrm_sink_records.append(VrmSinkRecord(
+                        kind=kind, name=name,
+                        properties=tuple((key, value) for key, value in properties if key.lower() != "name"),
+                        line_start_offset=offset, line_end_offset=line_end, line=line,
+                    ))
         marker_candidates = {
             match.start() for match in re.finditer(rb"(?im)^[ \t]*\.(?:End)?(?:Port|NetList)(?:[ \t\r\n]|$)", data)
             if not any(block.block_start_offset <= match.start() < block.block_end_offset for block in blocks)
@@ -571,7 +612,8 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
             "existing_port_keys": tuple(dict.fromkeys(keys)), "max_port_number": max_number,
             "port_records": tuple(port_records),
             "ground_nets": tuple(ground_nets), "net_names": tuple(net_names),
-            "power_nets": tuple(power_nets), "power_net_records": tuple(power_net_records)}
+            "power_nets": tuple(power_nets), "power_net_records": tuple(power_net_records),
+            "vrm_sink_records": tuple(vrm_sink_records)}
 
 
 def _net_token_name(token: str) -> str:
@@ -591,7 +633,7 @@ def _validate_port_metadata(path: Path, inventory: SpdInventory) -> None:
         raise ValueError("Duplicate Port names make Port mutation ambiguous.")
     for name in ("port_section_start_offset", "port_section_end_offset", "port_insertion_offset",
                  "existing_port_keys", "port_records", "max_port_number", "ground_nets", "net_names", "power_nets",
-                 "power_net_records"):
+                 "power_net_records", "vrm_sink_records"):
         if getattr(inventory, name) != fresh[name]:
             raise ValueError("SPD metadata changed since scan; reload before exporting Port or DC changes.")
 
@@ -634,6 +676,28 @@ def _apply_dc_setting(line: str, voltage: float, ground_net: str) -> str:
     return f"{line.rstrip()} Voltage = {format_voltage(voltage)} GroundNet = {ground_net}"
 
 
+_PROPERTY_RE = re.compile(r'(\w+)\s*=\s*("[^"]*"|\S+)')
+
+
+def _header_properties(line: str) -> list[tuple[str, str]]:
+    """``Key = Value`` pairs of a ``.VRM``/``.Sink`` header in file order; quoted values keep their quotes."""
+    return _PROPERTY_RE.findall(line)
+
+
+def is_number(text: str) -> bool:
+    try:
+        return math.isfinite(float(text))
+    except (TypeError, ValueError):
+        return False
+
+
+def _apply_vrm_sink_setting(line: str, changes: Mapping[str, str]) -> str:
+    """Replace only the value token of each changed ``Key = Value`` pair; everything else stays byte-identical."""
+    for key, value in changes.items():
+        line = re.sub(rf"(\b{re.escape(key)}\s*=\s*)(?:\"[^\"]*\"|\S+)", lambda match: match.group(1) + value, line, count=1)
+    return line
+
+
 def _port_enabled_from_header(header: str) -> bool:
     """Read only the independent Disabled state token after the Port name."""
     match = re.match(r"^\s*\S+(?:\s+(Disabled)(?=\s|$))?", header, re.IGNORECASE)
@@ -672,6 +736,7 @@ def write_spd_with_replacements(
     port_deletions: Sequence[str] | None = None,
     port_enabled_changes: Mapping[str, bool] | None = None,
     dc_settings: Sequence[DcSetting] | None = None,
+    vrm_sink_settings: Sequence[VrmSinkSetting] | None = None,
     inventory: SpdInventory | None = None,
 ) -> None:
     """Write a new SPD, replacing selected bodies and component identities."""
@@ -788,7 +853,10 @@ def write_spd_with_replacements(
     deletion_names = tuple(dict.fromkeys(port_deletions or ()))
     enabled_changes = dict(port_enabled_changes or {})
     dc_list = list(dc_settings or ())
-    inv = inventory or (scan_spd_inventory(source) if port_requests or deletion_names or enabled_changes or dc_list else None)
+    vrm_list = list(vrm_sink_settings or ())
+    inv = inventory or (
+        scan_spd_inventory(source) if port_requests or deletion_names or enabled_changes or dc_list or vrm_list else None
+    )
     if inv is not None:
         _validate_port_metadata(source, inv)
         records = {record.name: record for record in inv.port_records}
@@ -864,6 +932,39 @@ def write_spd_with_replacements(
             record = matches[0]
             replacement_by_offset[record.line_start_offset] = (
                 _apply_dc_setting(record.line, float(setting.voltage), setting.ground_net) + "\n",
+                record.line_end_offset,
+            )
+
+    if vrm_list:
+        assert inv is not None
+        vrm_records: dict[tuple[str, str], list[VrmSinkRecord]] = {}
+        for record in inv.vrm_sink_records:
+            vrm_records.setdefault(record.key, []).append(record)
+        seen_keys: set[tuple[str, str]] = set()
+        for setting in vrm_list:
+            key = (setting.kind, setting.name)
+            matches = vrm_records.get(key, [])
+            if not matches:
+                raise ValueError(f"Unknown {setting.kind}: {setting.name}")
+            if len(matches) > 1:
+                raise ValueError(f"Duplicate {setting.kind} names make the setting ambiguous: {setting.name}")
+            if key in seen_keys:
+                raise ValueError(f"Duplicate {setting.kind} setting: {setting.name}")
+            seen_keys.add(key)
+            record = matches[0]
+            existing = dict(record.properties)
+            changes = dict(setting.changes)
+            if not changes:
+                raise ValueError(f"No property change queued for {setting.kind} {setting.name}.")
+            for prop, value in changes.items():
+                if prop not in existing:
+                    raise ValueError(f"{setting.kind} {setting.name} has no {prop} property.")
+                if not value or any(char.isspace() for char in value) or '"' in value:
+                    raise ValueError(f"{prop} must be a single unquoted token: {value or '(empty)'}")
+                if is_number(existing[prop]) and not is_number(value):
+                    raise ValueError(f"{prop} must be a finite number: {value}")
+            replacement_by_offset[record.line_start_offset] = (
+                _apply_vrm_sink_setting(record.line, changes) + "\n",
                 record.line_end_offset,
             )
 

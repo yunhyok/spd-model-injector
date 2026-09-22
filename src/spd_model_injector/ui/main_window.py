@@ -50,8 +50,10 @@ from spd_model_injector.core.spd import (
     PortRequest,
     RefDesRecord,
     SpdInventory,
+    VrmSinkSetting,
     format_voltage,
     infer_voltage,
+    is_number,
     read_block_body,
     validate_port_requests,
 )
@@ -205,6 +207,7 @@ class MainWindow(QMainWindow):
         self.port_deletions: set[str] = set()
         self.port_enabled_changes: dict[str, bool] = {}
         self.dc_settings: dict[str, DcSetting] = {}
+        self.vrm_sink_settings: dict[tuple[str, str], dict[str, str]] = {}
         self._updating_port_management_table = False
         self._loading_editor = False
         self._busy = False
@@ -322,6 +325,35 @@ class MainWindow(QMainWindow):
         self.dc_volt_edit.setToolTip("Voltage applied by 'Apply to Selected'. 'Auto-fill' reads it from each NET name instead.")
         self.dc_volt_edit.setMaximumWidth(120)
         self.dc_volt_edit.returnPressed.connect(self.apply_dc_settings_to_selected)
+        self.vrm_sink_filter = QLineEdit()
+        self.vrm_sink_filter.setPlaceholderText("Search VRMs / Sinks... (Ctrl+F)")
+        self.vrm_sink_filter.setClearButtonEnabled(True)
+        self.vrm_sink_filter.setToolTip("Filter by type or name. Apply acts on selected visible rows only.")
+        self.vrm_sink_filter.textChanged.connect(self._apply_vrm_sink_filter)
+        self.vrm_sink_summary = QLabel("VRM/Sink: 0/0 shown; 0 selected; 0 pending")
+        self.vrm_sink_table = QTableWidget(0, 3)
+        self.vrm_sink_table.setObjectName("vrm_sink_table")
+        self.vrm_sink_table.setHorizontalHeaderLabels(["Type", "Name", "Status"])
+        self.vrm_sink_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.vrm_sink_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.vrm_sink_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.vrm_sink_table.setAlternatingRowColors(True)
+        self.vrm_sink_table.setSortingEnabled(True)
+        self.vrm_sink_table.itemSelectionChanged.connect(self._update_vrm_sink_state)
+        self.vrm_sink_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.vrm_sink_table.customContextMenuRequested.connect(self._show_vrm_sink_context_menu)
+        self.vrm_sink_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.vrm_sink_table.horizontalHeader().setStretchLastSection(True)
+        self.vrm_sink_table.horizontalHeader().resizeSection(0, 70)
+        self.vrm_sink_table.horizontalHeader().resizeSection(1, 340)
+        self.vrm_sink_table.horizontalHeader().setSortIndicator(1, Qt.SortOrder.AscendingOrder)
+        self.vrm_sink_property_combo = QComboBox()
+        self.vrm_sink_property_combo.setToolTip("Header property to change on the selected VRMs / Sinks (e.g. NominalVoltage, Current)")
+        self.vrm_sink_value_edit = QLineEdit()
+        self.vrm_sink_value_edit.setPlaceholderText("e.g. 0.9")
+        self.vrm_sink_value_edit.setToolTip("New value written for the chosen property on every selected row")
+        self.vrm_sink_value_edit.setMaximumWidth(120)
+        self.vrm_sink_value_edit.returnPressed.connect(self.apply_vrm_sink_setting_to_selected)
         self.refdes_table = DropRefDesTable(0, 2)
         self.refdes_table.setHorizontalHeaderLabels(["RefDes Name", "Activation Status"])
         self.refdes_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -409,6 +441,16 @@ class MainWindow(QMainWindow):
         self.clear_dc_action = QAction("Clear Pending DC Settings", self)
         self.clear_dc_action.setEnabled(False)
         self.clear_dc_action.triggered.connect(self.clear_dc_settings)
+        self.apply_vrm_sink_action = QAction("Apply VRM/Sink Property to Selected", self)
+        self.apply_vrm_sink_action.setToolTip("Queue the chosen Property = Value for the selected VRMs / Sinks")
+        self.apply_vrm_sink_action.setEnabled(False)
+        self.apply_vrm_sink_action.triggered.connect(self.apply_vrm_sink_setting_to_selected)
+        self.revert_vrm_sink_action = QAction("Revert Selected VRM/Sink Setting", self)
+        self.revert_vrm_sink_action.setEnabled(False)
+        self.revert_vrm_sink_action.triggered.connect(self.revert_vrm_sink_selected)
+        self.clear_vrm_sink_action = QAction("Clear Pending VRM/Sink Settings", self)
+        self.clear_vrm_sink_action.setEnabled(False)
+        self.clear_vrm_sink_action.triggered.connect(self.clear_vrm_sink_settings)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -433,6 +475,10 @@ class MainWindow(QMainWindow):
         dc_menu.addAction(self.auto_dc_action)
         dc_menu.addAction(self.revert_dc_action)
         dc_menu.addAction(self.clear_dc_action)
+        vrm_sink_menu = self.menuBar().addMenu("VRM/Sink")
+        vrm_sink_menu.addAction(self.apply_vrm_sink_action)
+        vrm_sink_menu.addAction(self.revert_vrm_sink_action)
+        vrm_sink_menu.addAction(self.clear_vrm_sink_action)
         self.undo_component_change_action = QAction("Undo Component Change", self)
         self.undo_component_change_action.setShortcut(QKeySequence.StandardKey.Undo)
         self.undo_component_change_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
@@ -450,9 +496,13 @@ class MainWindow(QMainWindow):
         self.dc_workspace_action = QAction("DC Setting", self)
         self.dc_workspace_action.setCheckable(True)
         self.dc_workspace_action.triggered.connect(lambda _checked=False: self._show_workspace(2))
+        self.vrm_sink_workspace_action = QAction("VRM/Sink Setting", self)
+        self.vrm_sink_workspace_action.setCheckable(True)
+        self.vrm_sink_workspace_action.triggered.connect(lambda _checked=False: self._show_workspace(3))
         view_menu.addAction(self.model_workspace_action)
         view_menu.addAction(self.port_workspace_action)
         view_menu.addAction(self.dc_workspace_action)
+        view_menu.addAction(self.vrm_sink_workspace_action)
         self.help_menu = self.menuBar().addMenu("Help")
         formats_action = QAction("Input File Formats", self)
         formats_action.triggered.connect(self.show_input_file_formats)
@@ -605,11 +655,51 @@ class MainWindow(QMainWindow):
         dc_buttons.addStretch(1)
         dc_layout.addLayout(dc_buttons)
 
+        vrm_root = QWidget()
+        vrm_layout = QVBoxLayout(vrm_root)
+        vrm_layout.addWidget(QLabel("VRM/Sink Setting (properties of the VRMs and Sinks already defined in the SPD)"))
+        self.vrm_sink_hint = QLabel(
+            "Select one or more rows (Ctrl/Shift-click or Ctrl+A on the filtered list), pick a Property, enter the new "
+            "Value, then Apply. Only properties already present on each .VRM / .Sink header line are changed; rows "
+            "without the chosen property are skipped. Pin mappings are never touched."
+        )
+        self.vrm_sink_hint.setWordWrap(True)
+        vrm_layout.addWidget(self.vrm_sink_hint)
+        vrm_layout.addWidget(self.vrm_sink_filter)
+        vrm_layout.addWidget(self.vrm_sink_summary)
+        vrm_layout.addWidget(self.vrm_sink_table, 1)
+        vrm_editor = QHBoxLayout()
+        vrm_editor.addWidget(QLabel("Property"))
+        vrm_editor.addWidget(self.vrm_sink_property_combo, 1)
+        vrm_editor.addWidget(QLabel("Value"))
+        vrm_editor.addWidget(self.vrm_sink_value_edit)
+        self.vrm_sink_apply_button = QPushButton("Apply to Selected")
+        self.vrm_sink_apply_button.setEnabled(False)
+        self.vrm_sink_apply_button.clicked.connect(self.apply_vrm_sink_setting_to_selected)
+        self.vrm_sink_revert_button = QPushButton("Revert Selected")
+        self.vrm_sink_revert_button.setEnabled(False)
+        self.vrm_sink_revert_button.clicked.connect(self.revert_vrm_sink_selected)
+        vrm_editor.addWidget(self.vrm_sink_apply_button)
+        vrm_editor.addWidget(self.vrm_sink_revert_button)
+        vrm_layout.addLayout(vrm_editor)
+        vrm_buttons = QHBoxLayout()
+        self.vrm_sink_clear_button = QPushButton("Clear Pending")
+        self.vrm_sink_clear_button.setEnabled(False)
+        self.vrm_sink_clear_button.clicked.connect(self.clear_vrm_sink_settings)
+        self.vrm_sink_export_button = QPushButton("Export New SPD")
+        self.vrm_sink_export_button.setEnabled(False)
+        self.vrm_sink_export_button.clicked.connect(self.export_spd_dialog)
+        vrm_buttons.addWidget(self.vrm_sink_clear_button)
+        vrm_buttons.addWidget(self.vrm_sink_export_button)
+        vrm_buttons.addStretch(1)
+        vrm_layout.addLayout(vrm_buttons)
+
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.workspace_tabs.addTab(model_root, "Model & RefDes")
         self.workspace_tabs.addTab(port_root, "Port Generation")
         self.workspace_tabs.addTab(dc_root, "DC Setting")
+        self.workspace_tabs.addTab(vrm_root, "VRM/Sink Setting")
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -626,7 +716,7 @@ class MainWindow(QMainWindow):
         self._filter_shortcut.activated.connect(self._focus_workspace_filter)
 
     def _focus_workspace_filter(self) -> None:
-        searches = {1: self.power_net_filter, 2: self.dc_net_filter}
+        searches = {1: self.power_net_filter, 2: self.dc_net_filter, 3: self.vrm_sink_filter}
         search = searches.get(self.workspace_tabs.currentIndex(), self.component_filter)
         search.setFocus()
         search.selectAll()
@@ -651,17 +741,22 @@ class MainWindow(QMainWindow):
             self.dc_table,
             self.dc_ground_combo,
             self.dc_volt_edit,
+            self.vrm_sink_table,
+            self.vrm_sink_property_combo,
+            self.vrm_sink_value_edit,
         ):
             widget.setEnabled(not busy)
         if hasattr(self, "clear_pending_ports_action") and self.clear_pending_ports_action is not None:
             self.clear_pending_ports_action.setEnabled(not busy and bool(self.pending_port_requests))
         self._update_generate_port_state()
         self._update_dc_state()
+        self._update_vrm_sink_state()
 
     def _workspace_changed(self, index: int) -> None:
         self.model_workspace_action.setChecked(index == 0)
         self.port_workspace_action.setChecked(index == 1)
         self.dc_workspace_action.setChecked(index == 2)
+        self.vrm_sink_workspace_action.setChecked(index == 3)
 
     def _show_workspace(self, index: int) -> None:
         self.workspace_tabs.setCurrentIndex(index)
@@ -1062,6 +1157,183 @@ class MainWindow(QMainWindow):
         elif selected is revert_action:
             self.revert_dc_selected()
 
+    def _populate_vrm_sink_table(self) -> None:
+        keep = set(self._selected_vrm_sink_keys(include_hidden=True))
+        table = self.vrm_sink_table
+        sorting_enabled = table.isSortingEnabled()
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+        records = sorted(self.inventory.vrm_sink_records, key=lambda record: (record.kind, record.name))
+        properties = list(dict.fromkeys(key for record in self.inventory.vrm_sink_records for key, _ in record.properties))
+        table.setColumnCount(len(properties) + 3)
+        table.setHorizontalHeaderLabels(["Type", "Name", *properties, "Status"])
+        table.setRowCount(len(records))
+        status_column = len(properties) + 2
+        for row, record in enumerate(records):
+            pending = self.vrm_sink_settings.get(record.key, {})
+            values = dict(record.properties)
+            cells = [record.kind, record.name, *(pending.get(prop, values.get(prop, "")) for prop in properties)]
+            cells.append("Pending" if pending else "")
+            for column, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                if column < 2:
+                    item.setData(Qt.ItemDataRole.UserRole, value)
+                if pending and (column < 2 or column == status_column or properties[column - 2] in pending):
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setForeground(self._modified_color())
+                table.setItem(row, column, item)
+        table.setSortingEnabled(sorting_enabled)
+        if keep:
+            selection = table.selectionModel()
+            for row in range(table.rowCount()):
+                if self._vrm_sink_key_at(row) in keep:
+                    selection.select(
+                        table.model().index(row, 0),
+                        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+        combo = self.vrm_sink_property_combo
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(properties)
+        if current in properties:
+            combo.setCurrentText(current)
+        combo.blockSignals(False)
+        self._apply_vrm_sink_filter(self.vrm_sink_filter.text())
+
+    def _vrm_sink_key_at(self, row: int) -> tuple[str, str]:
+        items = [self.vrm_sink_table.item(row, column) for column in (0, 1)]
+        kind, name = (str(item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else "" for item in items)
+        return (kind, name)
+
+    def _apply_vrm_sink_filter(self, text: str) -> None:
+        needle = text.strip().casefold()
+        table = self.vrm_sink_table
+        for row in range(table.rowCount()):
+            hidden = bool(needle) and needle not in " ".join(self._vrm_sink_key_at(row)).casefold()
+            table.setRowHidden(row, hidden)
+            if hidden and table.selectionModel().isRowSelected(row, table.rootIndex()):
+                table.selectionModel().select(
+                    table.model().index(row, 0),
+                    QItemSelectionModel.SelectionFlag.Deselect | QItemSelectionModel.SelectionFlag.Rows,
+                )
+        self._update_vrm_sink_state()
+
+    def _selected_vrm_sink_keys(self, include_hidden: bool = False) -> list[tuple[str, str]]:
+        table = self.vrm_sink_table
+        return sorted(
+            self._vrm_sink_key_at(index.row())
+            for index in table.selectionModel().selectedRows(0)
+            if include_hidden or not table.isRowHidden(index.row())
+        )
+
+    def _update_vrm_sink_state(self) -> None:
+        if not hasattr(self, "clear_vrm_sink_action"):
+            return
+        table = self.vrm_sink_table
+        total = table.rowCount()
+        visible = sum(1 for row in range(total) if not table.isRowHidden(row))
+        keys = self._selected_vrm_sink_keys()
+        self.vrm_sink_summary.setText(
+            f"VRM/Sink: {visible}/{total} shown; {len(keys)} selected; {len(self.vrm_sink_settings)} pending"
+        )
+        can_edit = not self._busy and self.spd_path is not None and bool(keys) and self.vrm_sink_property_combo.count() > 0
+        self.vrm_sink_apply_button.setEnabled(can_edit)
+        self.apply_vrm_sink_action.setEnabled(can_edit)
+        can_revert = can_edit and any(key in self.vrm_sink_settings for key in keys)
+        self.vrm_sink_revert_button.setEnabled(can_revert)
+        self.revert_vrm_sink_action.setEnabled(can_revert)
+        has_pending = not self._busy and bool(self.vrm_sink_settings)
+        self.vrm_sink_clear_button.setEnabled(has_pending)
+        self.clear_vrm_sink_action.setEnabled(has_pending)
+        self.vrm_sink_export_button.setEnabled(has_pending)
+
+    def apply_vrm_sink_setting_to_selected(self) -> None:
+        if self._busy:
+            return
+        keys = self._selected_vrm_sink_keys()
+        if not keys:
+            self._append_status("Select one or more VRMs / Sinks before applying a property.")
+            return
+        prop = self.vrm_sink_property_combo.currentText()
+        value = self.vrm_sink_value_edit.text().strip()
+        if not prop or not value or any(char.isspace() for char in value) or '"' in value:
+            QMessageBox.warning(
+                self, "VRM/Sink Setting", f"{prop or 'Property'} value must be a single unquoted token: {value or '(empty)'}"
+            )
+            return
+        records = {record.key: record for record in self.inventory.vrm_sink_records}
+        targets = [records[key] for key in keys if key in records]
+        if not is_number(value) and any(is_number(dict(record.properties).get(prop, "")) for record in targets):
+            QMessageBox.warning(self, "VRM/Sink Setting", f"{prop} must be a number: {value}")
+            return
+        queued: list[str] = []
+        unchanged = skipped = 0
+        for record in targets:
+            current = dict(record.properties).get(prop)
+            if current is None:
+                skipped += 1
+                continue
+            pending = dict(self.vrm_sink_settings.get(record.key, {}))
+            if current == value or (is_number(current) and is_number(value) and float(current) == float(value)):
+                pending.pop(prop, None)  # identical to the file; nothing to write
+                unchanged += 1
+            else:
+                pending[prop] = value
+                queued.append(f"{record.kind} {record.name}")
+            if pending:
+                self.vrm_sink_settings[record.key] = pending
+            else:
+                self.vrm_sink_settings.pop(record.key, None)
+        message = f"Queued {prop} = {value} for {len(queued)} VRM/Sink(s): {', '.join(queued) or '-'}"
+        if unchanged:
+            message += f" ({unchanged} already in the file)"
+        if skipped:
+            message += f" ({skipped} skipped: no {prop} property)"
+        self._append_status(message)
+        self._populate_vrm_sink_table()
+
+    def revert_vrm_sink_selected(self) -> None:
+        keys = [key for key in self._selected_vrm_sink_keys() if key in self.vrm_sink_settings]
+        for key in keys:
+            del self.vrm_sink_settings[key]
+        if keys:
+            self._append_status(f"Reverted {len(keys)} pending VRM/Sink setting(s).")
+        self._populate_vrm_sink_table()
+
+    def clear_vrm_sink_settings(self) -> None:
+        count = len(self.vrm_sink_settings)
+        self.vrm_sink_settings.clear()
+        if count:
+            self._append_status(f"Cleared {count} pending VRM/Sink setting(s).")
+        self._populate_vrm_sink_table()
+
+    def _queued_vrm_sink_settings(self) -> list[VrmSinkSetting]:
+        return [
+            VrmSinkSetting(kind, name, tuple(sorted(changes.items())))
+            for (kind, name), changes in sorted(self.vrm_sink_settings.items())
+        ]
+
+    def _show_vrm_sink_context_menu(self, position) -> None:
+        table = self.vrm_sink_table
+        row = table.indexAt(position).row()
+        if row < 0 or self._busy:
+            return
+        if not table.selectionModel().isRowSelected(row, table.rootIndex()):
+            table.clearSelection()
+            table.selectRow(row)
+        menu = QMenu(table)
+        prop = self.vrm_sink_property_combo.currentText() or "Property"
+        apply_action = menu.addAction(f"Apply {prop} ({len(self._selected_vrm_sink_keys())} rows)")
+        revert_action = menu.addAction("Revert Selected")
+        selected = menu.exec(table.viewport().mapToGlobal(position))
+        if selected is apply_action:
+            self.apply_vrm_sink_setting_to_selected()
+        elif selected is revert_action:
+            self.revert_vrm_sink_selected()
+
     def _clear_scan_refs(self) -> None:
         if self.sender() is self._scan_thread:
             self._scan_thread = None
@@ -1143,6 +1415,7 @@ class MainWindow(QMainWindow):
         self.port_deletions.clear()
         self.port_enabled_changes.clear()
         self.dc_settings.clear()
+        self.vrm_sink_settings.clear()
         self._show_validation("", error=False)
         self.status_log.clear()
         self.populate_components()
@@ -1154,6 +1427,8 @@ class MainWindow(QMainWindow):
         self._set_dc_ground_options(self._inventory_ground_nets(inventory), net_names)
         self.dc_net_filter.clear()
         self._populate_dc_table()
+        self.vrm_sink_filter.clear()
+        self._populate_vrm_sink_table()
         self._update_undo_component_change_action()
         if self.export_refdes_action is not None:
             self.export_refdes_action.setEnabled(bool(self.refdes_records))
@@ -1280,7 +1555,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self._has_port_changes() and not self.dc_settings:
+        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self._has_port_changes() and not self.dc_settings and not self.vrm_sink_settings:
             confirm = QMessageBox.question(
                 self,
                 "Export",
@@ -1376,6 +1651,7 @@ class MainWindow(QMainWindow):
             port_deletions=sorted(self.port_deletions),
             port_enabled_changes=dict(self.port_enabled_changes),
             dc_settings=[self.dc_settings[name] for name in sorted(self.dc_settings)],
+            vrm_sink_settings=self._queued_vrm_sink_settings(),
             inventory=self.inventory,
         )
         self._export_worker.moveToThread(self._export_thread)
