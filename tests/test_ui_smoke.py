@@ -49,6 +49,8 @@ def test_main_window_has_expected_title_and_empty_initial_state() -> None:
 
     assert app is not None
     assert window.windowTitle() == f"SPD Model Injector {__version__}"
+    assert not window.windowIcon().isNull()
+    assert 16 in {size.width() for size in window.windowIcon().availableSizes()}
     assert window.component_list.count() == 0
     assert "Load an SPD file" in window.status_label.text()
     assert window.undo_component_change_action is not None

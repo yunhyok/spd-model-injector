@@ -34,6 +34,18 @@ def test_packaging_files_define_app_and_installer_names() -> None:
     assert "$LASTEXITCODE" in build_script
 
 
+def test_app_icon_is_shipped_and_wired_into_exe_and_installer() -> None:
+    icon = ROOT / "src" / "spd_model_injector" / "ui" / "app.ico"
+    header = icon.read_bytes()[:6]
+    assert header[:4] == b"\x00\x00\x01\x00" and header[4] >= 5  # ICO container with several sizes
+    assert (ROOT / "src" / "spd_model_injector" / "ui" / "app.png").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert (ROOT / "packaging" / "icon.svg").exists()
+    pyinstaller_spec = (ROOT / "packaging" / "spd-model-injector.spec").read_text(encoding="utf-8")
+    assert "icon=APP_ICON" in pyinstaller_spec and "app.ico" in pyinstaller_spec
+    inno_setup = (ROOT / "packaging" / "spd-model-injector.iss").read_text(encoding="utf-8")
+    assert re.search(r"^SetupIconFile=.*app\.ico$", inno_setup, re.MULTILINE)
+
+
 def test_version_metadata_is_synchronized() -> None:
     pyproject_version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
     inno_setup = (ROOT / "packaging" / "spd-model-injector.iss").read_text(encoding="utf-8")
