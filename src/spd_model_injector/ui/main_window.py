@@ -59,6 +59,7 @@ from spd_model_injector.core.spd import (
     validate_port_requests,
 )
 from spd_model_injector.core.spice import ModelValidationError, prepare_model_for_partialckt
+from spd_model_injector.ui.model_library import ModelLibrary
 from spd_model_injector.ui.workers import ExportWorker, ScanWorker
 
 
@@ -195,7 +196,7 @@ NET_HEADER_ALIASES = frozenset({"net", "net name"})
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, *, restore_model_library: bool = True) -> None:
         super().__init__()
         self.setWindowTitle(f"SPD Model Injector {__version__}")
         self.setWindowIcon(app_icon())
@@ -389,6 +390,9 @@ class MainWindow(QMainWindow):
         self.editor.fileDropped.connect(self.import_model_text)
         self.editor.fileDropError.connect(lambda message: self._show_validation(message, error=True))
         self.editor.textChanged.connect(self._on_editor_changed)
+        self.model_library = ModelLibrary(self, restore_last=restore_model_library)
+        self.model_library.modelSelected.connect(self.import_model_text)
+        self.model_library.error.connect(lambda message: self._show_validation(message, error=True))
 
         self.validation_label = QLabel("")
         self.validation_label.setWordWrap(True)
@@ -476,6 +480,8 @@ class MainWindow(QMainWindow):
         model_menu = self.menuBar().addMenu("Model")
         model_menu.addAction(self.validate_action)
         model_menu.addAction(self.revert_action)
+        model_menu.addSeparator()
+        self.model_library.add_menu(model_menu)
         port_menu = self.menuBar().addMenu("Port")
         port_menu.addAction(self.generate_port_action)
         self.clear_pending_ports_action = QAction("Clear Pending Ports", self)
@@ -551,6 +557,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.revert_button)
         button_row.addStretch(1)
         center_layout.addLayout(button_row)
+        center_layout.addWidget(self.model_library)
         center_layout.addWidget(self.editor, 1)
         center_layout.addWidget(self.validation_label)
         work_splitter.addWidget(center)
@@ -734,6 +741,7 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
+        self.model_library.set_workspace_busy(busy)
         for action in (self.load_action, self.validate_action, self.revert_action, self.export_action):
             action.setEnabled(not busy)
         if self.import_refdes_status_action is not None:
@@ -1365,6 +1373,11 @@ class MainWindow(QMainWindow):
             self._export_worker = None
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self.model_library.is_busy:
+            self.model_library.cancel_indexing()
+            self.status_label.setText("Cancelling model library operation. Close again after it finishes.")
+            event.ignore()
+            return
         if any(thread is not None and thread.isRunning() for thread in (self._scan_thread, self._export_thread)):
             message = "Busy: wait for the current scan or export to finish before closing."
             self.status_label.setText(message)
@@ -1516,6 +1529,8 @@ class MainWindow(QMainWindow):
         self.import_model_text(text)
 
     def import_model_text(self, raw_model: str) -> None:
+        if self._busy:
+            return
         block = self.current_block()
         if block is None:
             self._show_validation("Select a PartialCkt before importing a model.", error=True)
