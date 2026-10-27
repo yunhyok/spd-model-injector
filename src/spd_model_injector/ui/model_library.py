@@ -13,6 +13,7 @@ from spd_model_injector.core.model_library import (
     LibraryIndex, LibraryIndexCancelled, build_index, load_index, read_model_text,
     save_index_as, search_entries,
 )
+from spd_model_injector.ui.theme import section_title
 
 
 INDEX_FILTER = "SPICE model index (*.sqlite);;All files (*)"
@@ -53,6 +54,8 @@ class ModelLibrary(QWidget):
 
     def __init__(self, parent: QWidget | None = None, *, settings: QSettings | None = None, restore_last: bool = True) -> None:
         super().__init__(parent)
+        self.setObjectName("model_library")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.settings = settings if settings is not None else QSettings("SPD Model Injector", "SPD Model Injector")
         self.index: LibraryIndex | None = None
         self.index_path: Path | None = None
@@ -73,18 +76,20 @@ class ModelLibrary(QWidget):
         self.results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.results.setColumnWidth(0, 180)
         self.results.setColumnWidth(1, 140)
-        self.results.setMaximumHeight(140)
-        self.results.setMinimumHeight(70)
+        self.results.setMaximumHeight(110)
+        self.results.setMinimumHeight(76)
         self.results.itemActivated.connect(self.load_selected)
         self.results.itemSelectionChanged.connect(self._update_controls)
         self.results.hide()
         self.status = QLabel("Model library: use Model > Model Library > Index Model Folder...")
+        self.status.setProperty("muted", True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.status.setMinimumWidth(0)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(10, 4, 10, 4)
         layout.setSpacing(4)
+        layout.addWidget(section_title("MODEL LIBRARY"))
         row = QHBoxLayout()
         row.addWidget(self.search, 1)
         row.addWidget(self.load_button)

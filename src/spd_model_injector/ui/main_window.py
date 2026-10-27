@@ -60,6 +60,7 @@ from spd_model_injector.core.spd import (
 )
 from spd_model_injector.core.spice import ModelValidationError, prepare_model_for_partialckt
 from spd_model_injector.ui.model_library import ModelLibrary
+from spd_model_injector.ui.theme import apply_theme, section_title
 from spd_model_injector.ui.workers import ExportWorker, ScanWorker
 
 
@@ -83,6 +84,7 @@ class DropModelEditor(QPlainTextEdit):
             font = QFont("Courier New")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setFixedPitch(True)
+        font.setPointSize(10)
         self.setFont(font)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
@@ -198,6 +200,7 @@ NET_HEADER_ALIASES = frozenset({"net", "net name"})
 class MainWindow(QMainWindow):
     def __init__(self, *, restore_model_library: bool = True) -> None:
         super().__init__()
+        apply_theme(self)
         self.setWindowTitle(f"SPD Model Injector {__version__}")
         self.setWindowIcon(app_icon())
         self.resize(1400, 760)
@@ -234,6 +237,7 @@ class MainWindow(QMainWindow):
         self.clear_pending_ports_action: QAction | None = None
 
         self.component_list_label = QLabel("PartialCkt Components (0/0)")
+        self.component_list_label.setProperty("sectionTitle", True)
         self.component_filter = QLineEdit()
         self.component_filter.setPlaceholderText("Filter components...")
         self.component_filter.setToolTip("Filter components by name (Ctrl+F)")
@@ -245,10 +249,15 @@ class MainWindow(QMainWindow):
         self.component_list.customContextMenuRequested.connect(self._show_component_context_menu)
 
         self.component_label = QLabel("No component selected")
+        self.component_label.setObjectName("component_name")
         self.mapping_label = QLabel("Load an SPD file to inspect PartialCkt blocks.")
+        self.mapping_label.setProperty("muted", True)
         self.mapping_label.setWordWrap(True)
+        self.mapping_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.mapping_label.setMaximumHeight(2 * self.mapping_label.fontMetrics().lineSpacing())
 
         self.refdes_label = QLabel("Load an SPD file to inspect RefDes records.")
+        self.refdes_label.setProperty("muted", True)
         self.refdes_label.setWordWrap(True)
         self.power_net_filter = QLineEdit()
         self.power_net_filter.setPlaceholderText("Search Power NETs... (Ctrl+F)")
@@ -387,6 +396,7 @@ class MainWindow(QMainWindow):
         refdes_header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
 
         self.editor = DropModelEditor()
+        self.editor.setObjectName("model_editor")
         self.editor.fileDropped.connect(self.import_model_text)
         self.editor.fileDropError.connect(lambda message: self._show_validation(message, error=True))
         self.editor.textChanged.connect(self._on_editor_changed)
@@ -403,9 +413,10 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
 
         self.status_log = QPlainTextEdit()
+        self.status_log.setObjectName("output_log")
         self.status_log.setReadOnly(True)
         self.status_log.setMaximumBlockCount(200)
-        self.status_log.setFixedHeight(120)
+        self.status_log.setFixedHeight(48)
         self.status_log.setPlaceholderText("Status details will appear here.")
 
         self._build_layout()
@@ -528,25 +539,49 @@ class MainWindow(QMainWindow):
     def _build_layout(self) -> None:
         model_root = QSplitter(Qt.Orientation.Horizontal)
         model_root.setObjectName("root_splitter")
-        left = QWidget()
+        left = QFrame()
+        left.setProperty("panel", True)
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.addWidget(self.component_list_label)
         left_layout.addWidget(self.component_filter)
         left_layout.addWidget(self.component_list)
         model_root.addWidget(left)
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         work_splitter = QSplitter(Qt.Orientation.Horizontal)
         work_splitter.setObjectName("work_splitter")
         center = QWidget()
         center_layout = QVBoxLayout(center)
-        center_layout.addWidget(self.component_label)
-        center_layout.addWidget(self.mapping_label)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(5)
+        self.model_target_panel = QFrame()
+        self.model_target_panel.setProperty("panel", True)
+        target_layout = QVBoxLayout(self.model_target_panel)
+        target_layout.setContentsMargins(10, 4, 10, 4)
+        target_layout.setSpacing(3)
+        target_heading = QHBoxLayout()
+        target_heading.setSpacing(10)
+        target_heading.addWidget(section_title("MODEL TARGET"))
+        target_heading.addWidget(self.component_label, 1)
+        target_layout.addLayout(target_heading)
+        target_layout.addWidget(self.mapping_label)
+        center_layout.addWidget(self.model_target_panel)
+        center_layout.addWidget(self.model_library)
+        self.model_editor_panel = QFrame()
+        self.model_editor_panel.setProperty("panel", True)
+        editor_layout = QVBoxLayout(self.model_editor_panel)
+        editor_layout.setContentsMargins(10, 6, 10, 6)
+        editor_layout.setSpacing(5)
         button_row = QHBoxLayout()
+        button_row.addWidget(section_title("MODEL EDITOR"))
+        button_row.addStretch(1)
         self.import_button = QPushButton("Import .mod/.txt")
         self.import_button.setToolTip("Import a SPICE model file into the editor (Ctrl+I)")
         self.import_button.clicked.connect(self.import_model_dialog)
         self.validate_button = QPushButton("Validate/Convert")
+        self.validate_button.setProperty("primary", True)
         self.validate_button.setToolTip("Validate or convert the current editor text (Ctrl+Return)")
         self.validate_button.clicked.connect(self.validate_current_text)
         self.revert_button = QPushButton("Revert")
@@ -555,28 +590,30 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.import_button)
         button_row.addWidget(self.validate_button)
         button_row.addWidget(self.revert_button)
-        button_row.addStretch(1)
-        center_layout.addLayout(button_row)
-        center_layout.addWidget(self.model_library)
-        center_layout.addWidget(self.editor, 1)
-        center_layout.addWidget(self.validation_label)
+        editor_layout.addLayout(button_row)
+        editor_layout.addWidget(self.editor, 1)
+        editor_layout.addWidget(self.validation_label)
+        center_layout.addWidget(self.model_editor_panel, 1)
         work_splitter.addWidget(center)
         self.refdes_panel = QFrame()
         self.refdes_panel.setObjectName("refdes_panel")
+        self.refdes_panel.setProperty("panel", True)
         self.refdes_panel.setFrameShape(QFrame.Shape.StyledPanel)
         self.refdes_panel.setFrameShadow(QFrame.Shadow.Sunken)
         self.refdes_panel.setLineWidth(1)
         refdes_layout = QVBoxLayout(self.refdes_panel)
         refdes_layout.setContentsMargins(8, 8, 8, 8)
         refdes_layout.setSpacing(6)
-        refdes_layout.addWidget(QLabel("RefDes List"))
+        refdes_layout.addWidget(section_title("REFDES LIST"))
         refdes_layout.addWidget(self.refdes_label)
         refdes_layout.addWidget(self.refdes_table, 1)
         work_splitter.addWidget(self.refdes_panel)
-        work_splitter.setSizes([720, 380])
+        work_splitter.setSizes([770, 360])
+        work_splitter.setHandleWidth(8)
         right_layout.addWidget(work_splitter, 1)
         model_root.addWidget(right)
-        model_root.setSizes([300, 1100])
+        model_root.setSizes([270, 1130])
+        model_root.setHandleWidth(8)
 
         port_root = QWidget()
         port_layout = QVBoxLayout(port_root)
@@ -584,7 +621,7 @@ class MainWindow(QMainWindow):
         port_splitter.setObjectName("port_splitter")
         generation_panel = QWidget()
         generation_layout = QVBoxLayout(generation_panel)
-        generation_layout.addWidget(QLabel("Port Generation"))
+        generation_layout.addWidget(section_title("PORT GENERATION"))
         generation_layout.addWidget(self.port_readiness_banner)
         generation_layout.addWidget(QLabel("1. Select one or more Target Power NET channels"))
         generation_layout.addWidget(self.power_net_filter)
@@ -605,7 +642,7 @@ class MainWindow(QMainWindow):
 
         management_panel = QWidget()
         management_layout = QVBoxLayout(management_panel)
-        management_layout.addWidget(QLabel("Existing and Pending Port Management"))
+        management_layout.addWidget(section_title("EXISTING AND PENDING PORTS"))
         management_layout.addWidget(self.pending_ports_label)
         management_layout.addWidget(self.port_management_table, 1)
         port_buttons = QHBoxLayout()
@@ -631,7 +668,7 @@ class MainWindow(QMainWindow):
 
         dc_root = QWidget()
         dc_layout = QVBoxLayout(dc_root)
-        dc_layout.addWidget(QLabel("DC Setting (PowerDC Voltage / Pairing P/G NET per Power NET channel)"))
+        dc_layout.addWidget(section_title("DC SETTING · PowerDC Voltage / Pairing P/G NET"))
         self.dc_hint = QLabel(
             "Select one or more channels (Ctrl/Shift-click or Ctrl+A on the filtered list), set Pairing P/G NET and "
             "Volt (V), then Apply. Applying to an inactive NET also activates it for simulation. "
@@ -675,7 +712,7 @@ class MainWindow(QMainWindow):
 
         vrm_root = QWidget()
         vrm_layout = QVBoxLayout(vrm_root)
-        vrm_layout.addWidget(QLabel("VRM/Sink Setting (properties of the VRMs and Sinks already defined in the SPD)"))
+        vrm_layout.addWidget(section_title("VRM / SINK SETTING · Existing SPD properties"))
         self.vrm_sink_hint = QLabel(
             "Select one or more rows (Ctrl/Shift-click or Ctrl+A on the filtered list), pick a Property, enter the new "
             "Value, then Apply. Only properties already present on each .VRM / .Sink header line are changed; rows "
@@ -722,8 +759,14 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central_layout = QVBoxLayout(central)
         central_layout.addWidget(self.workspace_tabs, 1)
-        central_layout.addWidget(QLabel("Output"))
-        central_layout.addWidget(self.status_log)
+        output_panel = QFrame()
+        output_panel.setProperty("panel", True)
+        output_layout = QVBoxLayout(output_panel)
+        output_layout.setContentsMargins(8, 6, 8, 8)
+        output_layout.setSpacing(4)
+        output_layout.addWidget(section_title("OUTPUT"))
+        output_layout.addWidget(self.status_log)
+        central_layout.addWidget(output_panel)
         self.setCentralWidget(central)
 
     def _build_shortcuts(self) -> None:
@@ -1781,6 +1824,7 @@ class MainWindow(QMainWindow):
         if len(block.ext_nodes) > 20:
             ext_preview += f" ... (+{len(block.ext_nodes) - 20} more)"
         self.mapping_label.setText(f"ExtNode ({block.port_count}): {ext_preview}{model_info}")
+        self.mapping_label.setToolTip(self.mapping_label.text())
 
     def _is_dark_palette(self) -> bool:
         return self.palette().color(QPalette.ColorRole.Window).lightness() < 128
