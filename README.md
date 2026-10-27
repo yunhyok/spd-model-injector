@@ -27,6 +27,8 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 ## Model Library (0.9.0)
 
+Version 0.9.1 uses a charcoal workspace inspired by [Adobe Spectrum's background layers](https://spectrum.adobe.com/foundations/color/background-layers): distinct Model Target, Model Library, and Model Editor panels, clearer table headers and selections, blue focus/primary actions, and a compact Output panel. The same palette is applied to all four workspaces, with visible disabled controls and existing status colors.
+
 1. Choose `Model > Model Library > Index Model Folder...`, select the parent of your manufacturer/part-number folders, then choose where to save the `.sqlite` index. Subfolders are included; indexing runs in the background.
 2. Search above the model editor using a part number, manufacturer, package size, capacitance, or several terms together (for example `Murata 0402 100nF`). Every term must match. Searches ignore case and recognize equivalent capacitance units such as `0.1 uF`, `100 nF`, and `100000 pF`, including `µF`/`μF`.
 3. Select the target PartialCkt and double-click a result, press Enter in the search field, or click `Load Selected`. The app reads the current source model and uses the same port validation/conversion as file import. Hover over the result to inspect its path and comments. The first 200 matches are shown; refine the search to narrow the list.

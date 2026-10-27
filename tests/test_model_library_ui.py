@@ -150,6 +150,25 @@ def test_cancelled_save_dialog_does_not_start_indexing(windows, tmp_path, monkey
     assert not settings.contains("modelLibrary/indexPath")
 
 
+@pytest.mark.parametrize("mapping", ["ExtNode (2): 1 2", "ExtNode (24): " + " ".join(f"LGA_A{i}" for i in range(20)) + " ... (+4 more)"])
+def test_populated_model_panels_leave_editor_usable_at_minimum_size(windows, tmp_path, mapping):
+    app, create, _ = windows
+    window = create()
+    _indexed(window, tmp_path)
+    _selected_component(window)
+    window.mapping_label.setText(mapping)
+    window.resize(900, 600)
+    window.show()
+    app.processEvents()
+
+    assert (window.width(), window.height()) == (900, 600)
+    assert window.model_library.results.isVisible()
+    assert window.model_library.results.geometry().bottom() < window.model_library.status.geometry().top()
+    assert window.editor.viewport().height() >= 3 * window.editor.fontMetrics().lineSpacing()
+    for button in (window.import_button, window.validate_button, window.revert_button):
+        assert window.model_editor_panel.rect().contains(button.geometry())
+
+
 def test_last_index_reopens_in_new_window_with_temporary_settings(windows, tmp_path):
     app, create, settings = windows
     first = create()
