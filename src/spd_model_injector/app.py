@@ -9,7 +9,7 @@ from spd_model_injector.ui.main_window import MainWindow
 
 def main() -> int:
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(restore_model_library="--smoke-test" not in sys.argv)
     window.show()
     if "--smoke-test" in sys.argv:
         app.processEvents()

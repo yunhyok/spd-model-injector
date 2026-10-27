@@ -86,7 +86,7 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert [action.text() for action in menu_actions[0].menu().actions()] == [
         "Load SPD", "Export New SPD", "", "Export RefDes Excel", "Import RefDes Excel", "", "Exit"
     ]
-    assert [action.text() for action in menu_actions[2].menu().actions()] == ["Validate/Convert", "Revert"]
+    assert [action.text() for action in menu_actions[2].menu().actions()] == ["Validate/Convert", "Revert", "", "Model Library"]
     assert [action.text() for action in menu_actions[3].menu().actions()] == ["Generate Port", "Clear Pending Ports"]
     assert [action.text() for action in menu_actions[4].menu().actions()] == [
         "Apply DC Setting to Selected", "Auto-fill Selected (Volt from NET name)", "Revert Selected DC Setting", "Clear Pending DC Settings"

@@ -12,6 +12,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Display RefDes activation status as `Automatic`, `Enabled`, `Disabled`, or `Unknown`.
 - Export all RefDes records to an Excel `.xlsx` file with component, RefDes name, and activation status.
 - Paste or drag-and-drop `.mod` / `.txt` SPICE model text.
+- Index a local model folder and search file/folder names, subcircuit names, and comments directly above the model editor.
 - Parse `.SUBCKT` headers, including `+` continuation lines.
 - Map model ports to the selected PartialCkt `ExtNode` order.
 - Preserve vendor comment lines before `.SUBCKT`.
@@ -23,6 +24,25 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Queue PowerDC DC settings (`Voltage` and pairing `GroundNet`) per Power NET channel, with search, multi-selection, and voltage auto-fill from the NET name.
 - Change the properties of VRMs and Sinks already defined in the SPD (`NominalVoltage`, `SenseVoltage`, `OutputCurrent`, `Current`, `Model`, ...) for many rows at once, with search and multi-selection.
 - Write output as UTF-8 with LF line endings.
+
+## Model Library (0.9.0)
+
+1. Choose `Model > Model Library > Index Model Folder...`, select the parent of your manufacturer/part-number folders, then choose where to save the `.sqlite` index. Subfolders are included; indexing runs in the background.
+2. Search above the model editor using a part number, manufacturer, package size, capacitance, or several terms together (for example `Murata 0402 100nF`). Every term must match. Searches ignore case and recognize equivalent capacitance units such as `0.1 uF`, `100 nF`, and `100000 pF`, including `µF`/`μF`.
+3. Select the target PartialCkt and double-click a result, press Enter in the search field, or click `Load Selected`. The app reads the current source model and uses the same port validation/conversion as file import. Hover over the result to inspect its path and comments. The first 200 matches are shown; refine the search to narrow the list.
+
+The `Model Library` menu also provides:
+
+- `Open Model Index...`: load an existing index. The last successfully opened/saved index is restored on the next launch.
+- `Save Model Index As...`: save a copy elsewhere and switch to it. The original index remains available.
+- `Update Model Index`: rescan the original folder, incorporating added, changed, and deleted files. If that folder has moved, choose its new location when prompted.
+- `Cancel Library Operation`: stop the current index, open, or save operation. Failed/cancelled operations leave the previous index intact.
+
+Opening, restoring, and saving indexes also run in the background so large libraries do not block the interface.
+
+Indexes can be saved beside a writable executable or in any writable folder. A user documents folder is the default; installed applications under `Program Files` may not be writable. Avoid the application's `_internal` folder, which the installer replaces during upgrades. The index stores model paths and searchable metadata, **not copies of the source models**. Keep the model folder available to load a result. If using the index on another PC or after moving the models, use `Update Model Index` to select the new root when the old root is unavailable. Index files contain local paths and vendor comments; share them only when appropriate.
+
+Supported candidates are `.mod`, `.lib`, `.cir`, `.sp`, `.spi`, `.spice`, `.ckt`, `.net`, `.txt`, and `.inc` files containing a `.SUBCKT` header. PDF datasheets, archives, binaries, symlink/junction directories, and files larger than 8 MiB are excluded. Full-line and inline SPICE comments are searched; datasheet OCR and ZIP extraction are not included. A match in the library does not guarantee that the existing SPICE converter supports its dialect; unsupported/multiple subcircuits still fail validation before the editor is replaced. Updates are explicit, rather than a continuous folder watcher.
 
 ## Generate Port
 
