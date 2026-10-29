@@ -9,7 +9,7 @@ import pytest
 from PySide6.QtCore import QSettings, QTimer, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSplitter
 
 from spd_model_injector.core import model_library as library_core
 from spd_model_injector.core.spd import PartialCktBlock
@@ -109,6 +109,33 @@ def test_model_library_menu_and_search_are_above_editor(windows):
     assert panel.search.accessibleName()
     assert not panel.search.isEnabled()
     assert not panel.load_button.isEnabled()
+
+
+def test_library_divider_gives_extra_height_to_results(windows, tmp_path):
+    app, create, _ = windows
+    window = create()
+    window.show()
+    app.processEvents()
+    _indexed(window, tmp_path)
+    app.processEvents()
+    splitter = window.findChild(QSplitter, "editor_splitter")
+    assert splitter is not None
+    assert splitter.orientation() == Qt.Orientation.Vertical
+    original = splitter.sizes()
+    results_height = window.model_library.results.height()
+    editor_height = window.editor.height()
+
+    splitter.moveSplitter(original[0] + 100, 1)
+    app.processEvents()
+    assert window.model_library.results.height() >= results_height + 90
+    assert window.editor.height() < editor_height
+    splitter.moveSplitter(0, 1)
+    app.processEvents()
+    assert window.model_library.results.height() >= 76
+    assert window.editor.height() >= editor_height
+    splitter.moveSplitter(splitter.height(), 1)
+    app.processEvents()
+    assert window.editor.viewport().height() > 0
 
 
 def test_folder_save_dialog_indexes_nested_models_then_search_loads_selected_component(windows, tmp_path, monkeypatch):

@@ -244,7 +244,10 @@ class MainWindow(QMainWindow):
         self.component_filter.textChanged.connect(self._apply_component_filter)
 
         self.component_list = QListWidget()
+        self.component_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.component_list.setToolTip("Ctrl-click or Shift-click to select components for one model assignment.")
         self.component_list.currentRowChanged.connect(self._on_current_row_changed)
+        self.component_list.itemSelectionChanged.connect(self._on_component_selection_changed)
         self.component_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.component_list.customContextMenuRequested.connect(self._show_component_context_menu)
 
@@ -416,7 +419,7 @@ class MainWindow(QMainWindow):
         self.status_log.setObjectName("output_log")
         self.status_log.setReadOnly(True)
         self.status_log.setMaximumBlockCount(200)
-        self.status_log.setFixedHeight(48)
+        self.status_log.setMinimumHeight(48)
         self.status_log.setPlaceholderText("Status details will appear here.")
 
         self._build_layout()
@@ -434,10 +437,10 @@ class MainWindow(QMainWindow):
         self.load_action.triggered.connect(self.load_spd_dialog)
         self.validate_action = QAction("Validate/Convert", self)
         self.validate_action.setShortcut(QKeySequence("Ctrl+Return"))
-        self.validate_action.setToolTip("Validate or convert the current editor text (Ctrl+Return)")
+        self.validate_action.setToolTip("Validate/convert and apply the editor text to all selected components (Ctrl+Return)")
         self.validate_action.triggered.connect(self.validate_current_text)
         self.revert_action = QAction("Revert", self)
-        self.revert_action.setToolTip("Revert the selected component to the body stored in the SPD")
+        self.revert_action.setToolTip("Revert all selected components to their bodies stored in the SPD")
         self.revert_action.triggered.connect(self.revert_current)
         self.export_action = QAction("Export New SPD", self)
         self.export_action.setShortcut(QKeySequence("Ctrl+E"))
@@ -568,7 +571,11 @@ class MainWindow(QMainWindow):
         target_layout.addLayout(target_heading)
         target_layout.addWidget(self.mapping_label)
         center_layout.addWidget(self.model_target_panel)
-        center_layout.addWidget(self.model_library)
+        editor_splitter = QSplitter(Qt.Orientation.Vertical)
+        editor_splitter.setObjectName("editor_splitter")
+        editor_splitter.setChildrenCollapsible(False)
+        editor_splitter.setHandleWidth(8)
+        editor_splitter.addWidget(self.model_library)
         self.model_editor_panel = QFrame()
         self.model_editor_panel.setProperty("panel", True)
         editor_layout = QVBoxLayout(self.model_editor_panel)
@@ -578,14 +585,14 @@ class MainWindow(QMainWindow):
         button_row.addWidget(section_title("MODEL EDITOR"))
         button_row.addStretch(1)
         self.import_button = QPushButton("Import .mod/.txt")
-        self.import_button.setToolTip("Import a SPICE model file into the editor (Ctrl+I)")
+        self.import_button.setToolTip("Import and apply a SPICE model to all selected components (Ctrl+I)")
         self.import_button.clicked.connect(self.import_model_dialog)
         self.validate_button = QPushButton("Validate/Convert")
         self.validate_button.setProperty("primary", True)
-        self.validate_button.setToolTip("Validate or convert the current editor text (Ctrl+Return)")
+        self.validate_button.setToolTip("Validate/convert and apply the editor text to all selected components (Ctrl+Return)")
         self.validate_button.clicked.connect(self.validate_current_text)
         self.revert_button = QPushButton("Revert")
-        self.revert_button.setToolTip("Revert the selected component to the body stored in the SPD")
+        self.revert_button.setToolTip("Revert all selected components to their bodies stored in the SPD")
         self.revert_button.clicked.connect(self.revert_current)
         button_row.addWidget(self.import_button)
         button_row.addWidget(self.validate_button)
@@ -593,7 +600,11 @@ class MainWindow(QMainWindow):
         editor_layout.addLayout(button_row)
         editor_layout.addWidget(self.editor, 1)
         editor_layout.addWidget(self.validation_label)
-        center_layout.addWidget(self.model_editor_panel, 1)
+        editor_splitter.addWidget(self.model_editor_panel)
+        editor_splitter.setSizes([self.model_library.sizeHint().height(), 400])
+        editor_splitter.setStretchFactor(0, 0)
+        editor_splitter.setStretchFactor(1, 1)
+        center_layout.addWidget(editor_splitter, 1)
         work_splitter.addWidget(center)
         self.refdes_panel = QFrame()
         self.refdes_panel.setObjectName("refdes_panel")
@@ -758,7 +769,11 @@ class MainWindow(QMainWindow):
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         central = QWidget()
         central_layout = QVBoxLayout(central)
-        central_layout.addWidget(self.workspace_tabs, 1)
+        output_splitter = QSplitter(Qt.Orientation.Vertical)
+        output_splitter.setObjectName("output_splitter")
+        output_splitter.setChildrenCollapsible(False)
+        output_splitter.setHandleWidth(8)
+        output_splitter.addWidget(self.workspace_tabs)
         output_panel = QFrame()
         output_panel.setProperty("panel", True)
         output_layout = QVBoxLayout(output_panel)
@@ -766,7 +781,11 @@ class MainWindow(QMainWindow):
         output_layout.setSpacing(4)
         output_layout.addWidget(section_title("OUTPUT"))
         output_layout.addWidget(self.status_log)
-        central_layout.addWidget(output_panel)
+        output_splitter.addWidget(output_panel)
+        output_splitter.setSizes([600, 86])
+        output_splitter.setStretchFactor(0, 1)
+        output_splitter.setStretchFactor(1, 0)
+        central_layout.addWidget(output_splitter)
         self.setCentralWidget(central)
 
     def _build_shortcuts(self) -> None:
@@ -1477,6 +1496,10 @@ class MainWindow(QMainWindow):
     def _scan_finished(self, inventory: SpdInventory) -> None:
         self.spd_path = self._pending_spd_path
         self._pending_spd_path = None
+        title = f"SPD Model Injector {__version__}"
+        if self.spd_path is not None:
+            title += f" - {self.spd_path.name}"
+        self.setWindowTitle(title)
         self.inventory = inventory
         self.blocks = inventory.blocks
         self.refdes_records = inventory.refdes_records
@@ -1544,11 +1567,16 @@ class MainWindow(QMainWindow):
 
     def _apply_component_filter(self, text: str) -> None:
         needle = text.strip().lower()
+        blocked = self.component_list.blockSignals(True)
         for row in range(self.component_list.count()):
             item = self.component_list.item(row)
             name = str(item.data(Qt.ItemDataRole.UserRole) or "")
             item.setHidden(bool(needle) and needle not in name.lower())
+            if item.isHidden():
+                item.setSelected(False)
+        self.component_list.blockSignals(blocked)
         self._update_component_header()
+        self._on_component_selection_changed()
 
     def _update_component_header(self) -> None:
         total = self.component_list.count()
@@ -1574,41 +1602,61 @@ class MainWindow(QMainWindow):
     def import_model_text(self, raw_model: str) -> None:
         if self._busy:
             return
-        block = self.current_block()
-        if block is None:
+        blocks = self.selected_component_blocks()
+        if not blocks:
             self._show_validation("Select a PartialCkt before importing a model.", error=True)
             return
+        prepared_bodies = {}
         try:
-            prepared = prepare_model_for_partialckt(raw_model, block.ext_nodes)
+            for block in blocks:
+                prepared_bodies[block.component_name] = prepare_model_for_partialckt(raw_model, block.ext_nodes)
         except ModelValidationError as exc:
-            self._show_validation(str(exc), error=True)
+            self._show_validation(f"{block.component_name}: {exc}", error=True)
             return
-        self._set_editor_text(prepared)
-        self.replacements[block.component_name] = prepared
+        self.replacements.update(prepared_bodies)
+        block = self.current_block()
+        self._set_editor_text(prepared_bodies[block.component_name])
         self._show_mapping(block, raw_model)
-        self._show_validation(f"OK: {block.port_count} model ports matched {block.port_count} ExtNode ports.", error=False)
+        self._show_validation(
+            f"OK: applied model to {len(blocks)} selected component(s); {block.port_count} ports mapped for each.",
+            error=False,
+        )
         self._refresh_current_item()
 
     def validate_current_text(self) -> None:
+        if self._busy:
+            return
         text = self.editor.toPlainText()
         if ".SUBCKT" in text.upper():
             self.import_model_text(text)
             return
-        block = self.current_block()
-        if block is None:
+        blocks = self.selected_component_blocks()
+        if not blocks:
             self._show_validation("No component selected.", error=True)
             return
-        self.replacements[block.component_name] = _ensure_lf_ending(text)
-        self._show_validation("OK: manual PartialCkt body will be used as edited.", error=False)
+        if any(block.ext_nodes != blocks[0].ext_nodes for block in blocks[1:]):
+            self._show_validation(
+                "Selected components have different ordered ExtNode lists. Use a full .SUBCKT model to map each target.",
+                error=True,
+            )
+            return
+        self.replacements.update({block.component_name: _ensure_lf_ending(text) for block in blocks})
+        self._show_validation(
+            f"OK: manual PartialCkt body applied to {len(blocks)} selected component(s) as edited.", error=False
+        )
         self._refresh_current_item()
 
     def revert_current(self) -> None:
-        block = self.current_block()
-        if block is None:
+        if self._busy:
             return
-        self.replacements.pop(block.component_name, None)
+        blocks = self.selected_component_blocks()
+        if not blocks:
+            return
+        for block in blocks:
+            self.replacements.pop(block.component_name, None)
+        block = self.current_block()
         self._load_block_body(block)
-        self._show_validation("Reverted to the body currently stored in the SPD.", error=False)
+        self._show_validation(f"Reverted {len(blocks)} selected component(s) to their bodies stored in the SPD.", error=False)
         self._refresh_current_item()
 
     def export_spd_dialog(self) -> None:
@@ -1766,10 +1814,15 @@ class MainWindow(QMainWindow):
         box.open()
 
     def _on_current_row_changed(self, row: int) -> None:
-        if row < 0 or row >= len(self.blocks):
+        block = self.current_block()
+        if block is None:
+            self.component_label.setText("No component selected (0 selected)")
+            self.mapping_label.setText("Select a PartialCkt to inspect or assign a model.")
+            self._set_editor_text("")
+            self._populate_refdes_table(None)
             return
-        block = self.blocks[row]
-        self.component_label.setText(block.component_name)
+        count = len(self.selected_component_blocks())
+        self.component_label.setText(f"{block.component_name} | {count} selected")
         self._show_mapping(block)
         self._populate_refdes_table(block.component_name)
         self._append_status(f"Selected {block.component_name}: {block.port_count} ports, lines {block.start_line}-{block.end_line}")
@@ -1778,8 +1831,22 @@ class MainWindow(QMainWindow):
         else:
             self._load_block_body(block)
 
+    def _on_component_selection_changed(self) -> None:
+        self._on_current_row_changed(self.component_list.currentRow())
+        count = len(self.selected_component_blocks())
+        self.revert_button.setText("Revert Selected" if count > 1 else "Revert")
+        self.revert_action.setText("Revert Selected" if count > 1 else "Revert")
+        if count > 1:
+            self._show_validation(
+                f"{count} selected. Imports apply to all selected components. Manual edits apply only after Validate/Convert.",
+                error=False,
+            )
+
     def _on_editor_changed(self) -> None:
-        if self._loading_editor:
+        if self._loading_editor or self._busy:
+            return
+        if len(self.selected_component_blocks()) > 1:
+            self._show_validation("Batch edit pending. Use Validate/Convert to apply to all selected components.", error=False)
             return
         block = self.current_block()
         if block is None:
@@ -1809,11 +1876,19 @@ class MainWindow(QMainWindow):
         self.editor.setPlainText(text)
         self._loading_editor = False
 
+    def selected_component_blocks(self) -> list[PartialCktBlock]:
+        return [
+            self.blocks[row]
+            for row in range(min(len(self.blocks), self.component_list.count()))
+            if self.component_list.item(row).isSelected() and not self.component_list.item(row).isHidden()
+        ]
+
     def current_block(self) -> PartialCktBlock | None:
         row = self.component_list.currentRow()
-        if row < 0 or row >= len(self.blocks):
-            return None
-        return self.blocks[row]
+        selected = self.selected_component_blocks()
+        if 0 <= row < len(self.blocks) and self.blocks[row] in selected:
+            return self.blocks[row]
+        return selected[0] if selected else None
 
     def _show_mapping(self, block: PartialCktBlock, raw_model: str | None = None) -> None:
         model_info = ""
@@ -1998,7 +2073,12 @@ class MainWindow(QMainWindow):
         row = self.component_list.indexAt(position).row()
         if row < 0 or row >= len(self.blocks):
             return
-        self.component_list.setCurrentRow(row)
+        selection = (
+            QItemSelectionModel.SelectionFlag.NoUpdate
+            if self.component_list.item(row).isSelected()
+            else QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
+        self.component_list.setCurrentRow(row, selection)
         menu = QMenu(self.component_list)
         clone_action = menu.addAction("Clone Component...")
         rename_action = menu.addAction("Rename Component...")
@@ -2046,7 +2126,9 @@ class MainWindow(QMainWindow):
         self.component_list.addItem(item)
         self._style_item(item, clone)
         self._update_component_header()
-        self.component_list.setCurrentRow(self.component_list.count() - 1)
+        self.component_list.setCurrentRow(
+            self.component_list.count() - 1, QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
         self._append_status(f"Cloned {source_name} as {name}.")
 
     def rename_current_component(self) -> None:
@@ -2055,7 +2137,7 @@ class MainWindow(QMainWindow):
         block = self.current_block()
         if block is None:
             return
-        row = self.component_list.currentRow()
+        row = self.blocks.index(block)
         old_name = block.component_name
         name = self._prompt_component_name("Rename Component", old_name)
         if not name or name == old_name:
@@ -2569,11 +2651,10 @@ class MainWindow(QMainWindow):
         return statuses, components, requires_full_inventory, errors
 
     def _refresh_current_item(self) -> None:
-        block = self.current_block()
-        row = self.component_list.currentRow()
-        if block is None or row < 0:
-            return
-        self._style_item(self.component_list.item(row), block)
+        for row, block in enumerate(self.blocks):
+            item = self.component_list.item(row)
+            if item is not None and item.isSelected() and not item.isHidden():
+                self._style_item(item, block)
 
     def _style_item(self, item: QListWidgetItem, block: PartialCktBlock) -> None:
         item.setText(self._item_text(block))

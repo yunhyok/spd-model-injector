@@ -118,6 +118,31 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     assert not window.dc_workspace_action.isChecked() and not window.vrm_sink_workspace_action.isChecked()
 
 
+def test_output_divider_resizes_log_in_every_workspace() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+    splitter = window.findChild(QSplitter, "output_splitter")
+    assert splitter is not None
+    assert splitter.orientation() == Qt.Orientation.Vertical
+
+    for index in range(window.workspace_tabs.count()):
+        window.workspace_tabs.setCurrentIndex(index)
+        app.processEvents()
+        original = splitter.sizes()
+        log_height = window.status_log.height()
+        splitter.moveSplitter(original[0] - 80, 1)
+        app.processEvents()
+        assert window.status_log.height() >= log_height + 70
+        assert splitter.sizes()[0] < original[0]
+        splitter.moveSplitter(splitter.height(), 1)
+        app.processEvents()
+        assert window.status_log.height() >= window.status_log.minimumHeight()
+        assert window.status_log.height() < log_height + 70
+    window.close()
+
+
 def test_refdes_menu_and_drop_share_auto_detection_and_help_action(monkeypatch, tmp_path: Path) -> None:
     QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -1068,12 +1093,14 @@ def test_load_spd_real_threaded_scan_completes(tmp_path: Path) -> None:
     )
 
     window.load_spd(spd)
+    assert window.windowTitle() == f"SPD Model Injector {__version__}"
     assert window._busy, "busy state should be set while the scan runs"
     assert window._scan_worker is not None, "worker must be strongly referenced during the scan"
 
     _spin_until(app, lambda: not window._busy, timeout=15.0, what="threaded scan to finish")
 
     assert window.spd_path == spd
+    assert window.windowTitle() == f"SPD Model Injector {__version__} - board.spd"
     assert len(window.blocks) == 2
     assert window.component_list.count() == 2
     assert "2/2" in window.component_list_label.text()
@@ -1085,6 +1112,21 @@ def test_load_spd_real_threaded_scan_completes(tmp_path: Path) -> None:
         timeout=15.0,
         what="scan thread/worker refs to be cleared",
     )
+
+    second = tmp_path / "두 번째 board.SPD"
+    second.write_bytes(spd.read_bytes())
+    window.load_spd(second)
+    assert window.windowTitle() == f"SPD Model Injector {__version__} - board.spd"
+    _spin_until(app, lambda: not window._busy and window._scan_thread is None,
+                timeout=15.0, what="second scan and thread cleanup to finish")
+    assert window.windowTitle() == f"SPD Model Injector {__version__} - {second.name}"
+
+    output = tmp_path / "exported.spd"
+    window.export_spd(output)
+    _spin_until(app, lambda: not window._busy and window._export_thread is None,
+                timeout=15.0, what="export and thread cleanup to finish")
+    assert output.exists()
+    assert window.windowTitle() == f"SPD Model Injector {__version__} - {second.name}"
 
 
 def test_failed_reload_preserves_the_current_workspace(tmp_path: Path, monkeypatch) -> None:
@@ -1110,11 +1152,13 @@ def test_failed_reload_preserves_the_current_workspace(tmp_path: Path, monkeypat
     monkeypatch.setattr(QMessageBox, "open", lambda _box: None)
 
     window.load_spd(missing)
+    assert window.windowTitle() == f"SPD Model Injector {__version__} - {source.name}"
     _spin_until(app, lambda: not window._busy and window._scan_thread is None,
                 timeout=15.0, what="failed reload and thread cleanup to finish")
 
     assert window.status_label.text() == "Operation failed."
     assert window.spd_path == source
+    assert window.windowTitle() == f"SPD Model Injector {__version__} - {source.name}"
     assert [block.component_name for block in window.blocks] == ["C1", "C2"]
     assert window.replacements == {"C1": "R 1 2 1\n"}
     assert window.refdes_component_changes == {"C100": "C2"}
@@ -1129,6 +1173,7 @@ def test_failed_reload_preserves_the_current_workspace(tmp_path: Path, monkeypat
                 timeout=15.0, what="initial failed scan and thread cleanup to finish")
     assert empty_window.status_label.text() == "Operation failed."
     assert empty_window.spd_path is None
+    assert empty_window.windowTitle() == f"SPD Model Injector {__version__}"
     assert empty_window.blocks == []
 
 

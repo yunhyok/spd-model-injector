@@ -12,6 +12,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Display RefDes activation status as `Automatic`, `Enabled`, `Disabled`, or `Unknown`.
 - Export all RefDes records to an Excel `.xlsx` file with component, RefDes name, and activation status.
 - Paste or drag-and-drop `.mod` / `.txt` SPICE model text.
+- Select multiple PartialCkt components with `Ctrl`/`Shift` and assign one model to all selected targets.
 - Index a local model folder and search file/folder names, subcircuit names, and comments directly above the model editor.
 - Parse `.SUBCKT` headers, including `+` continuation lines.
 - Map model ports to the selected PartialCkt `ExtNode` order.
@@ -25,7 +26,15 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Change the properties of VRMs and Sinks already defined in the SPD (`NominalVoltage`, `SenseVoltage`, `OutputCurrent`, `Current`, `Model`, ...) for many rows at once, with search and multi-selection.
 - Write output as UTF-8 with LF line endings.
 
+## Model assignment (0.9.2)
+
+Use `Ctrl`-click for individual components or `Shift`-click for a range. Then import/drop a model file, load a Model Library result, or paste a full `.SUBCKT` model and choose `Validate/Convert`. Each selected component receives its own port mapping in its `ExtNode` order. Every target must pass validation before any of the selected replacements are changed; a port-count mismatch rejects the whole batch.
+
+While multiple components are selected, manual editor changes are applied only when you choose `Validate/Convert`. A prepared PartialCkt body without a `.SUBCKT` header can be applied together only when the targets have identical ordered `ExtNode` lists. Use the full model when target node names differ. The editor previews one selected component, and `Revert` restores the selected targets. Filtered-out components are excluded from the selection.
+
 ## Model Library (0.9.0)
+
+In 0.9.2, drag the horizontal dividers above Output and between Model Library and Model Editor to adjust their heights. Output resizing works in all four workspaces. The title bar shows the successfully loaded SPD filename, for example `SPD Model Injector 0.9.2 - board.spd`; failed loads keep the current filename.
 
 Version 0.9.1 uses a charcoal workspace inspired by [Adobe Spectrum's background layers](https://spectrum.adobe.com/foundations/color/background-layers): distinct Model Target, Model Library, and Model Editor panels, clearer table headers and selections, blue focus/primary actions, and a compact Output panel. The same palette is applied to all four workspaces, with visible disabled controls and existing status colors.
 
