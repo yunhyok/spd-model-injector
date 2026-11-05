@@ -8,7 +8,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 - Load large text-format PowerSI `.spd` files.
 - List `.PartialCkt` components with detected `ExtNode` port counts.
-- Show RefDes records for the selected component from `.Connect` lines.
+- Show RefDes records for all selected components from `.Connect` lines.
 - Display RefDes activation status as `Automatic`, `Enabled`, `Disabled`, or `Unknown`.
 - Export all RefDes records to an Excel `.xlsx` file with component, RefDes name, and activation status.
 - Paste or drag-and-drop `.mod` / `.txt` SPICE model text.
@@ -31,6 +31,8 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 Use `Ctrl`-click for individual components or `Shift`-click for a range. Then import/drop a model file, load a Model Library result, or paste a full `.SUBCKT` model and choose `Validate/Convert`. Each selected component receives its own port mapping in its `ExtNode` order. Every target must pass validation before any of the selected replacements are changed; a port-count mismatch rejects the whole batch.
 
 While multiple components are selected, manual editor changes are applied only when you choose `Validate/Convert`. A prepared PartialCkt body without a `.SUBCKT` header can be applied together only when the targets have identical ordered `ExtNode` lists. Use the full model when target node names differ. The editor previews one selected component, and `Revert` restores the selected targets. Filtered-out components are excluded from the selection.
+
+In 0.9.4, `REFDES LIST` shows the combined RefDes records of all selected components, with a component count and total record count. The list follows selection and search changes, and stays combined after activation-status edits, component reassignment, and undo.
 
 ## Model Library (0.9.0)
 

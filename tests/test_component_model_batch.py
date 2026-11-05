@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QAbstractItemView
 
 from spd_model_injector.core import model_library
-from spd_model_injector.core.spd import read_block_body, scan_spd_inventory
+from spd_model_injector.core.spd import RefDesRecord, read_block_body, scan_spd_inventory
 from spd_model_injector.ui.main_window import MainWindow
 
 
@@ -67,6 +67,87 @@ def click(window, row, modifiers=Qt.KeyboardModifier.NoModifier):
         window.component_list.visualItemRect(item).center(),
     )
     QApplication.instance().processEvents()
+
+
+@pytest.fixture
+def refdes_window(make_window):
+    window = make_window()
+    window.refdes_records = [
+        RefDesRecord("CAP_0", "C3", "Disabled"),
+        RefDesRecord("CAP_0", "C1", "Automatic"),
+        RefDesRecord("CAP_1", "C2", "Enabled"),
+    ]
+    window.rebuild_refdes_groups()
+    return window
+
+
+def refdes_rows(window):
+    return [
+        (window.refdes_table.item(row, 0).text(), window.refdes_table.item(row, 1).text())
+        for row in range(window.refdes_table.rowCount())
+    ]
+
+
+def test_refdes_list_follows_ctrl_shift_selection_and_deselection(refdes_window):
+    window = refdes_window
+    click(window, 0)
+    assert refdes_rows(window) == [("C1", "Automatic"), ("C3", "Disabled")]
+    assert window.refdes_label.text() == "CAP_0: 2 RefDes records"
+    click(window, 1, Qt.KeyboardModifier.ControlModifier)
+    assert refdes_rows(window) == [("C1", "Automatic"), ("C2", "Enabled"), ("C3", "Disabled")]
+    assert window.refdes_label.text() == "2 components: 3 RefDes records"
+    window.refdes_table.sortItems(1, Qt.SortOrder.DescendingOrder)
+    click(window, 0)
+    click(window, 2, Qt.KeyboardModifier.ShiftModifier)
+    assert refdes_rows(window) == [("C2", "Enabled"), ("C3", "Disabled"), ("C1", "Automatic")]
+    assert window.refdes_label.text() == "3 components: 3 RefDes records"
+    click(window, 0, Qt.KeyboardModifier.ControlModifier)
+    assert refdes_rows(window) == [("C2", "Enabled")]
+    click(window, 2)
+    assert refdes_rows(window) == []
+    assert window.refdes_label.text() == "CAP_2: 0 RefDes records"
+
+
+def test_refdes_list_excludes_filtered_and_unselected_focused_components(refdes_window):
+    window = refdes_window
+    click(window, 0)
+    window.component_list.setCurrentRow(1, QItemSelectionModel.SelectionFlag.NoUpdate)
+    assert refdes_rows(window) == [("C1", "Automatic"), ("C3", "Disabled")]
+    click(window, 0)
+    click(window, 2, Qt.KeyboardModifier.ShiftModifier)
+    window.component_filter.setText("CAP_1")
+    assert refdes_rows(window) == [("C2", "Enabled")]
+    window.component_filter.clear()
+    assert refdes_rows(window) == [("C2", "Enabled")]
+    window.component_list.clearSelection()
+    assert refdes_rows(window) == []
+    assert window.refdes_label.text() == "Select a component to inspect RefDes records."
+    click(window, 0)
+    window.component_filter.setText("missing")
+    assert refdes_rows(window) == []
+
+
+def test_refdes_list_keeps_union_after_model_status_assignment_and_undo(refdes_window):
+    window = refdes_window
+    source_before = window.spd_path.read_bytes()
+    click(window, 0)
+    click(window, 1, Qt.KeyboardModifier.ControlModifier)
+    window.import_model_text(MODEL)
+    assert window.replacements == {"CAP_0": "C1 1 2 1u\n", "CAP_1": "C1 A B 1u\n"}
+    window.refdes_table.selectAll()
+    assert set(window.selected_refdes_names()) == {"C1", "C2", "C3"}
+    window.apply_refdes_activation_status_changes(window.selected_refdes_names(), "Disabled")
+    assert refdes_rows(window) == [("C1", "Disabled"), ("C2", "Disabled"), ("C3", "Disabled")]
+    window.apply_refdes_component_changes(["C1"], "CAP_1")
+    assert refdes_rows(window) == [("C1", "Disabled"), ("C2", "Disabled"), ("C3", "Disabled")]
+    window.apply_refdes_component_changes(["C2", "C3"], "CAP_2")
+    assert refdes_rows(window) == [("C1", "Disabled")]
+    window.undo_refdes_component_change()
+    assert refdes_rows(window) == [("C1", "Disabled"), ("C2", "Disabled"), ("C3", "Disabled")]
+    window.undo_refdes_component_change()
+    click(window, 0)
+    assert refdes_rows(window) == [("C1", "Disabled"), ("C3", "Disabled")]
+    assert window.spd_path.read_bytes() == source_before
 
 
 def test_ctrl_and_shift_click_select_targets_without_applying_models(make_window):
