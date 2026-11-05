@@ -1546,7 +1546,7 @@ class MainWindow(QMainWindow):
             self.component_label.setText("No component selected")
             self.mapping_label.setText("No PartialCkt blocks found.")
             self._set_editor_text("")
-            self._populate_refdes_table(None)
+            self._populate_refdes_table()
 
     def _scan_failed(self, message: str) -> None:
         self._pending_spd_path = None
@@ -1819,12 +1819,12 @@ class MainWindow(QMainWindow):
             self.component_label.setText("No component selected (0 selected)")
             self.mapping_label.setText("Select a PartialCkt to inspect or assign a model.")
             self._set_editor_text("")
-            self._populate_refdes_table(None)
+            self._populate_refdes_table()
             return
         count = len(self.selected_component_blocks())
         self.component_label.setText(f"{block.component_name} | {count} selected")
         self._show_mapping(block)
-        self._populate_refdes_table(block.component_name)
+        self._populate_refdes_table()
         self._append_status(f"Selected {block.component_name}: {block.port_count} ports, lines {block.start_line}-{block.end_line}")
         if block.component_name in self.replacements:
             self._set_editor_text(self.replacements[block.component_name])
@@ -1921,14 +1921,20 @@ class MainWindow(QMainWindow):
         escaped = html.escape(message)
         self.validation_label.setText(f"<span style='{style}'>{escaped}</span>")
 
-    def _populate_refdes_table(self, component_name: str | None) -> None:
+    def _populate_refdes_table(self) -> None:
         self.refdes_table.setRowCount(0)
-        if component_name is None:
+        blocks = self.selected_component_blocks()
+        if not blocks:
             self.refdes_label.setText("Select a component to inspect RefDes records.")
             return
 
-        records = self.refdes_by_component.get(component_name, [])
-        self.refdes_label.setText(f"{component_name}: {len(records)} RefDes records")
+        records = [
+            record
+            for block in blocks
+            for record in self.refdes_by_component.get(block.component_name, [])
+        ]
+        label = blocks[0].component_name if len(blocks) == 1 else f"{len(blocks)} components"
+        self.refdes_label.setText(f"{label}: {len(records)} RefDes records")
         sorting_enabled = self.refdes_table.isSortingEnabled()
         self.refdes_table.setSortingEnabled(False)
         self.refdes_table.setRowCount(len(records))
@@ -2164,7 +2170,7 @@ class MainWindow(QMainWindow):
         self.component_list.setCurrentRow(row)
         self.rebuild_refdes_groups()
         self._populate_port_refdes_table()
-        self._populate_refdes_table(name)
+        self._populate_refdes_table()
         self._update_undo_component_change_action()
         self._append_status(f"Renamed {old_name} to {name}.")
 
@@ -2252,8 +2258,7 @@ class MainWindow(QMainWindow):
     def _after_refdes_component_change(self, message: str) -> None:
         self.rebuild_refdes_groups()
         self._populate_port_refdes_table()
-        current = self.current_block()
-        self._populate_refdes_table(current.component_name if current is not None else None)
+        self._populate_refdes_table()
         self._update_undo_component_change_action()
         self.status_label.setText(message)
         self._append_status(message)
@@ -2261,8 +2266,7 @@ class MainWindow(QMainWindow):
     def _after_refdes_status_change(self, message: str) -> None:
         self.rebuild_refdes_groups()
         self._populate_port_refdes_table()
-        current = self.current_block()
-        self._populate_refdes_table(current.component_name if current is not None else None)
+        self._populate_refdes_table()
         self.status_label.setText(message)
         self._append_status(message)
 

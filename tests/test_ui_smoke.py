@@ -1209,7 +1209,8 @@ def test_generate_port_queues_selected_refdes_and_export_worker_forwards_request
     window.rebuild_refdes_groups()
     window._set_net_selectors(("VDD",), ("DGND", "VDD"), ("DGND",))
     window.power_net_list.item(0).setCheckState(Qt.CheckState.Checked)
-    window._populate_refdes_table("CAP")
+    window.populate_components()
+    window.component_list.setCurrentRow(0)
     window.refdes_table.selectRow(0)
 
     assert window.port_refdes_table.topLevelItemCount() == 1
