@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.9.4",
+    [string]$Version = "0.10.0",
     [string]$Repo = "spd-model-injector"
 )
 

@@ -7,6 +7,7 @@ import html
 import io
 import math
 from pathlib import Path
+import re
 
 from openpyxl import load_workbook
 from PySide6.QtCore import QItemSelectionModel, Qt, QThread, Signal
@@ -52,6 +53,7 @@ from spd_model_injector.core.spd import (
     RefDesRecord,
     SpdInventory,
     VrmSinkSetting,
+    export_spice_model,
     format_voltage,
     infer_voltage,
     is_number,
@@ -446,6 +448,10 @@ class MainWindow(QMainWindow):
         self.export_action.setShortcut(QKeySequence("Ctrl+E"))
         self.export_action.setToolTip("Export a new SPD with modified bodies replaced (Ctrl+E)")
         self.export_action.triggered.connect(self.export_spd_dialog)
+        self.export_model_action = QAction("Export Original SPICE...", self)
+        self.export_model_action.setToolTip(self.export_model_button.toolTip())
+        self.export_model_action.setEnabled(False)
+        self.export_model_action.triggered.connect(self.export_model_dialog)
         self.generate_port_action = QAction("Generate Port", self)
         self.generate_port_action.setToolTip("Queue a PowerSI Port for the selected RefDes instances")
         self.generate_port_action.setEnabled(False)
@@ -494,6 +500,7 @@ class MainWindow(QMainWindow):
         model_menu = self.menuBar().addMenu("Model")
         model_menu.addAction(self.validate_action)
         model_menu.addAction(self.revert_action)
+        model_menu.addAction(self.export_model_action)
         model_menu.addSeparator()
         self.model_library.add_menu(model_menu)
         port_menu = self.menuBar().addMenu("Port")
@@ -549,6 +556,13 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.component_list_label)
         left_layout.addWidget(self.component_filter)
         left_layout.addWidget(self.component_list)
+        self.export_model_button = QPushButton("Export Original SPICE...")
+        self.export_model_button.setToolTip(
+            "Select one existing component to save its original SPD model as a .mod file. Pending edits are excluded."
+        )
+        self.export_model_button.setEnabled(False)
+        self.export_model_button.clicked.connect(self.export_model_dialog)
+        left_layout.addWidget(self.export_model_button)
         model_root.addWidget(left)
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -832,6 +846,7 @@ class MainWindow(QMainWindow):
         self._update_generate_port_state()
         self._update_dc_state()
         self._update_vrm_sink_state()
+        self._update_model_export_state()
 
     def _workspace_changed(self, index: int) -> None:
         self.model_workspace_action.setChecked(index == 0)
@@ -1694,6 +1709,47 @@ class MainWindow(QMainWindow):
 
         self.export_spd(output_path)
 
+    def _selected_source_model(self) -> PartialCktBlock | None:
+        selected = self.selected_component_blocks()
+        if len(selected) != 1 or selected[0].clone_source_name is not None:
+            return None
+        block = selected[0]
+        if block.source_component_name is not None:
+            return replace(block, component_name=block.source_component_name, source_component_name=None)
+        return block
+
+    def _update_model_export_state(self) -> None:
+        enabled = not self._busy and self.spd_path is not None and self._selected_source_model() is not None
+        self.export_model_action.setEnabled(enabled)
+        self.export_model_button.setEnabled(enabled)
+
+    def export_model_dialog(self) -> None:
+        if self._busy:
+            return
+        block = self._selected_source_model()
+        if self.spd_path is None or block is None:
+            QMessageBox.information(self, "Export Original SPICE", "Select one component stored in the loaded SPD file.")
+            return
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", block.component_name).rstrip(" .")
+        default_path = self.spd_path.with_name(f"model_{filename or 'component'}.mod")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Original SPICE", str(default_path), "SPICE models (*.mod);;All files (*)"
+        )
+        if not path:
+            return
+        output_path = Path(path)
+        try:
+            export_spice_model(self.spd_path, output_path, block)
+        except (OSError, ValueError) as exc:
+            message = f"SPICE export failed: {exc}"
+            self.status_label.setText(message)
+            self._append_status(message)
+            QMessageBox.warning(self, "Export Original SPICE", str(exc))
+            return
+        message = f"Exported original SPICE model {block.component_name}: {output_path}"
+        self.status_label.setText(message)
+        self._append_status(message)
+
     def export_refdes_dialog(self) -> None:
         if not self.refdes_records:
             QMessageBox.information(self, "Export RefDes Excel", "No RefDes records are loaded.")
@@ -1833,6 +1889,7 @@ class MainWindow(QMainWindow):
 
     def _on_component_selection_changed(self) -> None:
         self._on_current_row_changed(self.component_list.currentRow())
+        self._update_model_export_state()
         count = len(self.selected_component_blocks())
         self.revert_button.setText("Revert Selected" if count > 1 else "Revert")
         self.revert_action.setText("Revert Selected" if count > 1 else "Revert")
@@ -2088,6 +2145,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self.component_list)
         clone_action = menu.addAction("Clone Component...")
         rename_action = menu.addAction("Rename Component...")
+        menu.addSeparator()
+        menu.addAction(self.export_model_action)
         selected = menu.exec(self.component_list.viewport().mapToGlobal(position))
         if selected is clone_action:
             self.clone_current_component()

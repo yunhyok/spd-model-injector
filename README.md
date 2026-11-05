@@ -8,6 +8,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 - Load large text-format PowerSI `.spd` files.
 - List `.PartialCkt` components with detected `ExtNode` port counts.
+- Export an existing embedded SPICE model to a standalone `.mod` file.
 - Show RefDes records for all selected components from `.Connect` lines.
 - Display RefDes activation status as `Automatic`, `Enabled`, `Disabled`, or `Unknown`.
 - Export all RefDes records to an Excel `.xlsx` file with component, RefDes name, and activation status.
@@ -25,6 +26,18 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Queue PowerDC DC settings (`Voltage` and pairing `GroundNet`) per Power NET channel, with search, multi-selection, and voltage auto-fill from the NET name.
 - Change the properties of VRMs and Sinks already defined in the SPD (`NominalVoltage`, `SenseVoltage`, `OutputCurrent`, `Current`, `Model`, ...) for many rows at once, with search and multi-selection.
 - Write output as UTF-8 with LF line endings.
+
+## Extract an embedded SPICE model (0.10.0)
+
+1. Load the SPD and select **one** existing component in `Model & RefDes`.
+2. Click `Export Original SPICE...` below the component list, in the `Model` menu, or in the component's right-click menu.
+3. Choose the `.mod` filename and save. The source SPD stays unchanged.
+
+The export reads the model stored in the source SPD. Pending editor changes are excluded; renamed components use their original name. New clones must be exported to a new SPD and reloaded before extraction. Select and export each model separately when several are needed.
+
+The file contains `.SUBCKT` / `.ENDS` wrappers with the SPD's ordered `ExtNode` pins. Body comments, node names, elements, and values are preserved, with UTF-8 encoding and LF line endings. Names containing punctuation are converted to letters, digits, and underscores for the subcircuit identifier; names beginning with a digit receive an `SPD_` prefix. The original component name is recorded in a comment. The vendor's original subcircuit name and pre-injection pin names cannot be recovered from an SPD that no longer contains them.
+
+Empty/comment-only models, malformed boundaries or pins, invalid UTF-8, and files changed since loading are rejected. Saving over the source SPD is blocked; a failed write preserves an existing destination. External `.include` / `.lib` references are preserved but their dependencies are not copied. Check those paths before simulation. Extraction preserves embedded element syntax; the existing importer still enforces its supported SPICE dialect.
 
 ## Model assignment (0.9.2)
 

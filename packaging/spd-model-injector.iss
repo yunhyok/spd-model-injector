@@ -2,7 +2,7 @@
 #define MyAppPublisher "spd-model-injector"
 #define MyAppExeName "SPD Model Injector.exe"
 #ifndef MyAppVersion
-#define MyAppVersion "0.9.4"
+#define MyAppVersion "0.10.0"
 #endif
 
 [Setup]
