@@ -733,6 +733,75 @@ def read_block_body(path: str | Path, block: PartialCktBlock) -> str:
     return _normalize_newlines(raw.decode("utf-8", errors="replace"))
 
 
+def export_spice_model(source_path: str | Path, output_path: str | Path, block: PartialCktBlock) -> None:
+    """Export one original scanned PartialCkt body with a SPICE subcircuit wrapper."""
+    source = Path(source_path)
+    output = Path(output_path)
+    _ensure_output_is_not_source(source, output)
+    source_signature = _source_signature(source)
+    if block.source_signature is None or block.source_signature != source_signature:
+        raise ValueError("SPD file or metadata changed since scan; reload before exporting.")
+    if block.clone_source_name is not None or block.source_component_name is not None:
+        raise ValueError("Export requires an original scanned PartialCkt block.")
+    if not (0 <= block.block_start_offset < block.body_start_offset <= block.body_end_offset
+            < block.block_end_offset <= source_signature[2]):
+        raise ValueError("Malformed PartialCkt offsets; reload before exporting.")
+
+    with source.open("rb") as handle:
+        handle.seek(block.block_start_offset)
+        raw = handle.read(block.block_end_offset - block.block_start_offset)
+    if len(raw) != block.block_end_offset - block.block_start_offset:
+        raise ValueError("SPD ended before the scanned block; reload before exporting.")
+    header_end = block.body_start_offset - block.block_start_offset
+    body_end = block.body_end_offset - block.block_start_offset
+    header_lines = _normalize_newlines(raw[:header_end].decode("utf-8")).splitlines()
+    body = _normalize_newlines(raw[header_end:body_end].decode("utf-8"))
+    end_marker = _normalize_newlines(raw[body_end:].decode("utf-8"))
+    if _source_signature(source) != source_signature:
+        raise ValueError("SPD changed during export; reload before exporting.")
+
+    if (not header_lines or header_lines != block.header_lines
+            or not _PARTIAL_RE.fullmatch(header_lines[0])
+            or any(not line.lstrip().startswith("+") for line in header_lines[1:])
+            or _parse_component_name(header_lines[0]) != block.component_name
+            or not block.component_name or not block.component_name.isprintable()
+            or not re.fullmatch(r"\.EndPartialCkt[ \t]*\n?", end_marker, re.IGNORECASE)):
+        raise ValueError("Malformed or stale PartialCkt header/end marker.")
+    ext_nodes = _parse_ext_nodes(header_lines)
+    if (not ext_nodes or ext_nodes != block.ext_nodes
+            or len({node.casefold() for node in ext_nodes}) != len(ext_nodes)
+            or any(not node.isprintable() or node.startswith(("*", "$"))
+                   or re.search(r"[\s,();=\"']", node) for node in ext_nodes)):
+        raise ValueError("PartialCkt ExtNode values must be distinct valid SPICE node tokens.")
+    if re.search(r"(?im)^\s*\.(?:SUBCKT|ENDS|END|(?:End)?PartialCkt)(?:\s|[;$]|$)", body):
+        raise ValueError("PartialCkt body contains a structural SPICE or PartialCkt marker.")
+    if not any(line.strip() and not line.lstrip().startswith(("*", ";", "$")) for line in body.splitlines()):
+        raise ValueError("PartialCkt model body is empty or contains only comments.")
+
+    safe_name = re.sub(r"[^A-Za-z0-9_]", "_", block.component_name)
+    if safe_name[0].isdigit():
+        safe_name = "SPD_" + safe_name
+    model = (f"* Original SPD component: {block.component_name}\n"
+             f".SUBCKT {safe_name} {' '.join(ext_nodes)}\n"
+             + _normalize_model_text(body) + f".ENDS {safe_name}\n")
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="wb", buffering=_CHUNK_SIZE, dir=output.parent, prefix=f".{output.name}.", suffix=".tmp", delete=False
+        ) as dst:
+            temporary_path = Path(dst.name)
+            dst.write(model.encode("utf-8"))
+            dst.flush()
+            os.fsync(dst.fileno())
+        if _source_signature(source) != source_signature:
+            raise ValueError("SPD changed during export; reload before exporting.")
+        _ensure_output_is_not_source(source, output)
+        os.replace(temporary_path, output)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def write_spd_with_replacements(
     source_path: str | Path,
     output_path: str | Path,
