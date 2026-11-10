@@ -30,6 +30,8 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 ## Copy settings from another SPD (0.11.0)
 
+Version 0.11.1 accepts NET names beginning with `+` (for example `+3_3V` and `+5V`) and copies direct layer `Permittivity` / `LossTangent` values as well as material references. These valid settings no longer trigger unsupported-row/property errors; all compatibility checks still apply.
+
 1. Load the **new board drawing** as the target SPD.
 2. Choose **File > Copy Settings from SPD...**, then browse to the previous SPD containing the settings.
 3. Check the categories to copy and choose **Validate & Copy...**. Save to a path different from both inputs.
@@ -37,7 +39,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 
 | Checkbox | Copied settings | Preserved target data |
 | --- | --- | --- |
-| Layer Stackup | Thickness, material/dielectric material, width, trace angle, and referenced inline material definitions | Shapes, patch geometry, colors, hole thresholds, and unrelated material definitions |
+| Layer Stackup | Thickness, material/dielectric material, permittivity/loss tangent, width, trace angle, and referenced inline material definitions | Shapes, patch geometry, colors, hole thresholds, and unrelated material definitions |
 | Channel Activation | Selected/unselected state of every named NET, including inactive and ordinary signal NETs | NET order, colors, DC voltage/pairing, and other flags |
 | Component Models | Embedded PartialCkt bodies, RefDes model assignments, and model activation (`Usage`) | Placement, connection nodes, other RefDes attributes, and target-only model definitions |
 | Ports | All source Ports, including names, activation, terminal lists, and header properties; replaces the target Port list | Board geometry; terminal nodes are remapped to target nodes by RefDes, pin, and NET |

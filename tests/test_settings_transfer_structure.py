@@ -98,3 +98,45 @@ def test_replaces_the_referenced_material_family_with_temperature_variants(tmp_p
     assert ".DielectricModel CORE Temperature = 50\n" in edits[0][2]
     assert "Temperature = 70" in target.read_bytes()[edits[1][0]:edits[1][1]].decode()
     assert edits[1][2] == ""
+
+
+def test_signed_net_names_are_channels_and_keep_their_activation_flags(tmp_path):
+    nets = _NETS.replace("SIG", "+3_3V").replace("VDD", "+5V")
+    source = _board(tmp_path / "source.spd", nets=nets)
+    target = _board(tmp_path / "target.spd", nets=nets.replace("::Unselected", ""), line_end="\r\n")
+
+    edits, summary = build_structure_edits(source, target, copy_stackup=False, copy_activation=True)
+    result = target.read_bytes()
+    for start, end, text in reversed(edits):
+        result = result[:start] + text.encode() + result[end:]
+    text = result.decode().replace("\r\n", "\n")
+    assert "+3_3V::Unselected||DropShape Color = RED" in text
+    assert "+5V -> PowerNets::Unselected||DropShape Voltage = 0.9 GroundNet = GND" in text
+    assert "Matched 3 layers and 4 NETs." in summary
+    assert "Changed activation for 2 NETs." in summary
+
+
+def test_bare_plus_continuation_is_still_rejected(tmp_path):
+    source = _board(tmp_path / "source.spd", nets=_NETS + "\t+ Voltage = 1.2\n")
+    target = _board(tmp_path / "target.spd")
+    with pytest.raises(ValueError, match="Unsupported NET row"):
+        build_structure_edits(source, target, copy_stackup=False, copy_activation=True)
+
+
+@pytest.mark.parametrize("direct_source", [True, False])
+def test_stackup_switches_between_direct_dielectric_values_and_material_reference(tmp_path, direct_source):
+    direct = _LAYERS.replace("Width = 36u", "Width = 36u Permittivity = 4.2 LossTangent = 0.02")
+    material = _LAYERS.replace("Width = 36u", "Width = 36u DielectricMaterial = CORE")
+    source = _board(tmp_path / "source.spd", layers=direct if direct_source else material)
+    target = _board(tmp_path / "target.spd", layers=material if direct_source else direct)
+
+    edits, _ = build_structure_edits(source, target, copy_stackup=True, copy_activation=False)
+    result = target.read_bytes()
+    for start, end, text in reversed(edits):
+        result = result[:start] + text.encode() + result[end:]
+    top = next(line for line in result.decode().splitlines() if line.startswith("Signal$TOP "))
+    assert ("Permittivity = 4.2" in top) == direct_source
+    assert ("LossTangent = 0.02" in top) == direct_source
+    assert ("DielectricMaterial = CORE" in top) != direct_source
+    assert "Color = GREEN" in top
+    assert "PatchSignal$TOP Shape = target_top" in result.decode()
