@@ -9,7 +9,7 @@ import re
 
 _LAYER = re.compile(r"(?:Signal|Plane|Medium)\$\S+", re.IGNORECASE)
 _FIELD = re.compile(r'([\w.]+)\s*=\s*("[^"]*"|\S+)')
-_PHYSICAL = {"thickness", "material", "dielectricmaterial", "width"}
+_PHYSICAL = {"thickness", "material", "dielectricmaterial", "width", "permittivity", "losstangent"}
 _TARGET_LAYER_FIELDS = {"shape", "color", "doglegholethreshold", "thermalholethreshold",
                         "smallholethreshold", "viaholethreshold"}
 _UNSELECTED = re.compile(r"::Unselected(?=::|\|\||$)", re.IGNORECASE)
@@ -358,7 +358,7 @@ def _nets(data: mmap.mmap) -> dict[str, _Net]:
                 raise ValueError("Unexpected or duplicate unnamed NET default row.")
             seen_default = True
             continue
-        if net_token.startswith((".", "+")):
+        if net_token.startswith(".") or net_token == "+":
             raise ValueError("Unsupported NET row in SPD .NetList.")
         name = re.split(r"::|\|\|", net_token, maxsplit=1)[0]
         if name in nets:
