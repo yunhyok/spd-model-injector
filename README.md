@@ -7,6 +7,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 ## Features
 
 - Load large text-format PowerSI `.spd` files.
+- Copy selected stackup, channel activation, component models, and Ports from another SPD, with compatibility checks before saving.
 - List `.PartialCkt` components with detected `ExtNode` port counts.
 - Export an existing embedded SPICE model to a standalone `.mod` file.
 - Show RefDes records for all selected components from `.Connect` lines.
@@ -26,6 +27,26 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Queue PowerDC DC settings (`Voltage` and pairing `GroundNet`) per Power NET channel, with search, multi-selection, and voltage auto-fill from the NET name.
 - Change the properties of VRMs and Sinks already defined in the SPD (`NominalVoltage`, `SenseVoltage`, `OutputCurrent`, `Current`, `Model`, ...) for many rows at once, with search and multi-selection.
 - Write output as UTF-8 with LF line endings.
+
+## Copy settings from another SPD (0.11.0)
+
+1. Load the **new board drawing** as the target SPD.
+2. Choose **File > Copy Settings from SPD...**, then browse to the previous SPD containing the settings.
+3. Check the categories to copy and choose **Validate & Copy...**. Save to a path different from both inputs.
+4. Load the saved SPD to continue editing it. Both input files remain unchanged.
+
+| Checkbox | Copied settings | Preserved target data |
+| --- | --- | --- |
+| Layer Stackup | Thickness, material/dielectric material, width, trace angle, and referenced inline material definitions | Shapes, patch geometry, colors, hole thresholds, and unrelated material definitions |
+| Channel Activation | Selected/unselected state of every named NET, including inactive and ordinary signal NETs | NET order, colors, DC voltage/pairing, and other flags |
+| Component Models | Embedded PartialCkt bodies, RefDes model assignments, and model activation (`Usage`) | Placement, connection nodes, other RefDes attributes, and target-only model definitions |
+| Ports | All source Ports, including names, activation, terminal lists, and header properties; replaces the target Port list | Board geometry; terminal nodes are remapped to target nodes by RefDes, pin, and NET |
+
+Every selection requires matching layer names/types/order and complete NET names/counts/group membership. Thickness and material values may differ because these are settings to copy. Model copying additionally requires matching RefDes names and pin-to-NET connections, compatible ordered ExtNode pins, and unique model definitions. Donor-only models require a `.Part` definition compatible with each affected target component's existing geometry. Ports require an unambiguous target for every terminal pin; old node numbers are never copied blindly. Generated Port model metadata follows the effective RefDes assignment even when only models or only Ports are selected.
+
+Any mismatch stops the entire copy and displays a warning. Validation happens before writing; both input identities are checked again before an atomic destination replacement. A failed validation or write preserves an existing destination. Large board geometry is streamed, and the copy runs in the background. Existing workspace edits must first be exported and that output loaded; the dialog copies saved SPD settings.
+
+Supported input is the conventional single-stack PowerSI text format. Unsupported multi-zone/conformal stackups, ambiguous/duplicate records, external SPICE `.include`/`.lib` dependencies, and Port terminals without identifiable Package.Node/RefDes pins are rejected. Inline material families (including temperature variants) are copied; an external material fallback requires the same absolute material-library reference in both files. External libraries are not bundled or checked in Cadence. Geometry already removed from an input by PowerSI is not reconstructed by reactivating a NET. Check the saved file in PowerSI before simulation.
 
 ## Extract an embedded SPICE model (0.10.0)
 

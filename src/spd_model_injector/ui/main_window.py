@@ -62,6 +62,7 @@ from spd_model_injector.core.spd import (
 )
 from spd_model_injector.core.spice import ModelValidationError, prepare_model_for_partialckt
 from spd_model_injector.ui.model_library import ModelLibrary
+from spd_model_injector.ui.settings_transfer import SettingsCopyDialog
 from spd_model_injector.ui.theme import apply_theme, section_title
 from spd_model_injector.ui.workers import ExportWorker, ScanWorker
 
@@ -227,6 +228,7 @@ class MainWindow(QMainWindow):
         self.vrm_sink_settings: dict[tuple[str, str], dict[str, str]] = {}
         self._updating_port_management_table = False
         self._loading_editor = False
+        self._batch_edit_pending = False
         self._busy = False
         self._scan_thread: QThread | None = None
         self._scan_worker: ScanWorker | None = None
@@ -448,6 +450,9 @@ class MainWindow(QMainWindow):
         self.export_action.setShortcut(QKeySequence("Ctrl+E"))
         self.export_action.setToolTip("Export a new SPD with modified bodies replaced (Ctrl+E)")
         self.export_action.triggered.connect(self.export_spd_dialog)
+        self.copy_settings_action = QAction("Copy Settings from SPD...", self)
+        self.copy_settings_action.setEnabled(False)
+        self.copy_settings_action.triggered.connect(self.copy_settings_dialog)
         self.export_model_action = QAction("Export Original SPICE...", self)
         self.export_model_action.setToolTip(self.export_model_button.toolTip())
         self.export_model_action.setEnabled(False)
@@ -491,6 +496,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self.load_action)
         file_menu.addAction(self.export_action)
+        file_menu.addAction(self.copy_settings_action)
         file_menu.addSeparator()
         file_menu.addAction(self.export_refdes_action)
         file_menu.addAction(self.import_refdes_status_action)
@@ -820,6 +826,7 @@ class MainWindow(QMainWindow):
         self.model_library.set_workspace_busy(busy)
         for action in (self.load_action, self.validate_action, self.revert_action, self.export_action):
             action.setEnabled(not busy)
+        self.copy_settings_action.setEnabled(not busy and self.spd_path is not None)
         if self.import_refdes_status_action is not None:
             self.import_refdes_status_action.setEnabled(not busy and bool(self.refdes_records))
         if self.undo_component_change_action is not None:
@@ -1455,8 +1462,8 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Cancelling model library operation. Close again after it finishes.")
             event.ignore()
             return
-        if any(thread is not None and thread.isRunning() for thread in (self._scan_thread, self._export_thread)):
-            message = "Busy: wait for the current scan or export to finish before closing."
+        if self._busy or any(thread is not None and thread.isRunning() for thread in (self._scan_thread, self._export_thread)):
+            message = "Busy: wait for the current SPD operation to finish before closing."
             self.status_label.setText(message)
             self._append_status(message)
             event.ignore()
@@ -1656,6 +1663,7 @@ class MainWindow(QMainWindow):
             )
             return
         self.replacements.update({block.component_name: _ensure_lf_ending(text) for block in blocks})
+        self._batch_edit_pending = False
         self._show_validation(
             f"OK: manual PartialCkt body applied to {len(blocks)} selected component(s) as edited.", error=False
         )
@@ -1673,6 +1681,35 @@ class MainWindow(QMainWindow):
         self._load_block_body(block)
         self._show_validation(f"Reverted {len(blocks)} selected component(s) to their bodies stored in the SPD.", error=False)
         self._refresh_current_item()
+
+    def _has_staged_spd_changes(self) -> bool:
+        return bool(
+            self.replacements or self.refdes_component_changes or self.refdes_activation_status_changes
+            or self.component_renames or self.component_clones or self._has_port_changes()
+            or self.dc_settings or self.vrm_sink_settings
+        )
+
+    def copy_settings_dialog(self) -> None:
+        if self._busy or self.spd_path is None:
+            return
+        if self._batch_edit_pending or self._has_staged_spd_changes():
+            message = "Use Export New SPD and load the exported file before copying settings."
+            if self._batch_edit_pending:
+                message = "Use Validate/Convert to apply the pending batch model edit first.\n\n" + message
+            QMessageBox.warning(self, "Pending SPD Edits", message)
+            return
+
+        dialog = SettingsCopyDialog(self.spd_path, self.inventory.source_signature, self)
+        self._set_busy(True)
+        try:
+            result = dialog.exec()
+            if result == QDialog.DialogCode.Accepted:
+                message = f"Copied settings to {dialog.output_path}"
+                self.status_label.setText(message)
+                self._append_status(message)
+        finally:
+            self._set_busy(False)
+            dialog.deleteLater()
 
     def export_spd_dialog(self) -> None:
         if self.spd_path is None:
@@ -1696,7 +1733,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if not self.replacements and not self.refdes_component_changes and not self.refdes_activation_status_changes and not self.component_renames and not self.component_clones and not self._has_port_changes() and not self.dc_settings and not self.vrm_sink_settings:
+        if not self._has_staged_spd_changes():
             confirm = QMessageBox.question(
                 self,
                 "Export",
@@ -1903,6 +1940,7 @@ class MainWindow(QMainWindow):
         if self._loading_editor or self._busy:
             return
         if len(self.selected_component_blocks()) > 1:
+            self._batch_edit_pending = True
             self._show_validation("Batch edit pending. Use Validate/Convert to apply to all selected components.", error=False)
             return
         block = self.current_block()
@@ -1930,6 +1968,7 @@ class MainWindow(QMainWindow):
 
     def _set_editor_text(self, text: str) -> None:
         self._loading_editor = True
+        self._batch_edit_pending = False
         self.editor.setPlainText(text)
         self._loading_editor = False
 

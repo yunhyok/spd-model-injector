@@ -84,7 +84,7 @@ def test_main_window_places_refdes_list_in_right_side_work_area() -> None:
     menu_actions = window.menuBar().actions()
     assert [action.text() for action in menu_actions] == ["File", "Edit", "Model", "Port", "DC", "VRM/Sink", "View", "Help"]
     assert [action.text() for action in menu_actions[0].menu().actions()] == [
-        "Load SPD", "Export New SPD", "", "Export RefDes Excel", "Import RefDes Excel", "", "Exit"
+        "Load SPD", "Export New SPD", "Copy Settings from SPD...", "", "Export RefDes Excel", "Import RefDes Excel", "", "Exit"
     ]
     assert [action.text() for action in menu_actions[2].menu().actions()] == [
         "Validate/Convert", "Revert", "Export Original SPICE...", "", "Model Library"
