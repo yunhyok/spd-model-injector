@@ -103,10 +103,10 @@ class SettingsCopyDialog(QDialog):
         categories.addWidget(section_title("Settings to Copy"))
         self.category_checks: dict[str, QCheckBox] = {}
         for name, label, tooltip in (
-            ("stackup", "Layer Stackup", "Copy layer properties such as thickness and materials."),
-            ("channel_activation", "Channel Activation", "Copy activation for all named NETs."),
-            ("component_models", "Component Models", "Copy model definitions, RefDes assignments, and model activation."),
-            ("ports", "Ports", "Replace all target ports and match terminals by RefDes, pin, and NET."),
+            ("stackup", "Layer Stackup", "Copy thickness and other properties between matching layer stacks."),
+            ("channel_activation", "Channel Activation", "Copy activation when all named NETs match."),
+            ("component_models", "Component Models", "Import embedded SPICE into matching component names. Keep target RefDes assignments and activation."),
+            ("ports", "Ports", "Replace the target Port list. Rebuild generated Ports from target NET pins and match manual terminals by RefDes, pin, and NET."),
         ):
             check = QCheckBox(label)
             check.setChecked(True)
@@ -115,8 +115,8 @@ class SettingsCopyDialog(QDialog):
             categories.addWidget(check)
             self.category_checks[name] = check
         help_text = QLabel(
-            "Creates a copy of the target with the selected settings from the source. Every copy requires "
-            "matching layer structure, NET names, and NET counts."
+            "Creates a copy of the target with the selected settings from the source. "
+            "Each category has its own compatibility checks."
         )
         help_text.setWordWrap(True)
         help_text.setProperty("muted", True)

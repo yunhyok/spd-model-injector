@@ -28,9 +28,9 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Change the properties of VRMs and Sinks already defined in the SPD (`NominalVoltage`, `SenseVoltage`, `OutputCurrent`, `Current`, `Model`, ...) for many rows at once, with search and multi-selection.
 - Write output as UTF-8 with LF line endings.
 
-## Copy settings from another SPD (0.11.0)
+## Copy settings from another SPD (0.12.0)
 
-Version 0.11.1 accepts NET names beginning with `+` (for example `+3_3V` and `+5V`) and copies direct layer `Permittivity` / `LossTangent` values as well as material references. These valid settings no longer trigger unsupported-row/property errors; all compatibility checks still apply.
+Version 0.11.1 accepts NET names beginning with `+` (for example `+3_3V` and `+5V`) and copies direct layer `Permittivity` / `LossTangent` values as well as material references.
 
 1. Load the **new board drawing** as the target SPD.
 2. Choose **File > Copy Settings from SPD...**, then browse to the previous SPD containing the settings.
@@ -41,14 +41,19 @@ Version 0.11.1 accepts NET names beginning with `+` (for example `+3_3V` and `+5
 | --- | --- | --- |
 | Layer Stackup | Thickness, material/dielectric material, permittivity/loss tangent, width, trace angle, and referenced inline material definitions | Shapes, patch geometry, colors, hole thresholds, and unrelated material definitions |
 | Channel Activation | Selected/unselected state of every named NET, including inactive and ordinary signal NETs | NET order, colors, DC voltage/pairing, and other flags |
-| Component Models | Embedded PartialCkt bodies, RefDes model assignments, and model activation (`Usage`) | Placement, connection nodes, other RefDes attributes, and target-only model definitions |
-| Ports | All source Ports, including names, activation, terminal lists, and header properties; replaces the target Port list | Board geometry; terminal nodes are remapped to target nodes by RefDes, pin, and NET |
+| Component Models | Embedded SPICE bodies for exact component-name matches | Target RefDes assignments, model activation (`Usage`), geometry, and target-only components |
+| Ports | Source Port names, activation, header properties, and terminal selections replace the target Port list | Target board geometry and connections |
 
-Every selection requires matching layer names/types/order and complete NET names/counts/group membership. Thickness and material values may differ because these are settings to copy. Model copying additionally requires matching RefDes names and pin-to-NET connections, compatible ordered ExtNode pins, and unique model definitions. Donor-only models require a `.Part` definition compatible with each affected target component's existing geometry. Ports require an unambiguous target for every terminal pin; old node numbers are never copied blindly. Generated Port model metadata follows the effective RefDes assignment even when only models or only Ports are selected.
+Compatibility depends on the selected categories.
 
-Any mismatch stops the entire copy and displays a warning. Validation happens before writing; both input identities are checked again before an atomic destination replacement. A failed validation or write preserves an existing destination. Large board geometry is streamed, and the copy runs in the background. Existing workspace edits must first be exported and that output loaded; the dialog copies saved SPD settings.
+- **Layer Stackup** requires matching layer names, types, and order. Values such as thickness and material may differ.
+- **Channel Activation** requires matching names, counts, and group membership across all named NETs.
+- **Component Models** matches existing components by exact name. Matching pin names retain their connections even if `ExtNode` order changes; the remaining renamed pins map in their listed order through the SPICE importer. Different pin counts or unsafe pin mapping stop the copy. The result reports source-only components and empty source models as skipped. Model-only copy works across different layer stacks, NET lists, and RefDes lists.
+- **Ports** rebuilds a generated Port whose two terminals use all pins of their respective NETs on one source RefDes. It uses the current pins on those two NETs for the matching target RefDes. Manual Ports and Ports with a subset of pins map each selected terminal pin by RefDes, pin, and NET. Missing or ambiguous matches stop the copy.
 
-Supported input is the conventional single-stack PowerSI text format. Unsupported multi-zone/conformal stackups, ambiguous/duplicate records, external SPICE `.include`/`.lib` dependencies, and Port terminals without identifiable Package.Node/RefDes pins are rejected. Inline material families (including temperature variants) are copied; an external material fallback requires the same absolute material-library reference in both files. External libraries are not bundled or checked in Cadence. Geometry already removed from an input by PowerSI is not reconstructed by reactivating a NET. Check the saved file in PowerSI before simulation.
+A failed compatibility check stops the entire copy and displays a warning before writing. The app checks both input files again before saving the result atomically. A failed validation or write preserves an existing destination. Large board geometry is streamed, and the copy runs in the background. To include workspace edits, use **Export New SPD** and load the exported file as the target first.
+
+Stackup copy supports the conventional single-stack PowerSI text format and inline material families, including temperature variants. An external material fallback requires the same absolute material-library reference in both files. Model copy requires embedded SPICE and rejects external `.include` or `.lib` dependencies. Port copy requires identifiable Package.Node and RefDes pins. Reactivating a NET cannot recover geometry previously removed by PowerSI. Check the saved file in PowerSI before simulation.
 
 ## Extract an embedded SPICE model (0.10.0)
 

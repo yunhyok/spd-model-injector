@@ -19,54 +19,66 @@ _Edit = tuple[int, int, str]
 def build_structure_edits(
     source: Path, target: Path, *, copy_stackup: bool, copy_activation: bool,
 ) -> tuple[list[_Edit], list[str]]:
-    """Validate all board structure and plan only bounded target setting edits."""
+    """Validate selected settings and plan bounded target edits."""
+    if not (copy_stackup or copy_activation):
+        return [], []
+    edits: list[_Edit] = []
+    summary: list[str] = []
     with source.open("rb") as src, target.open("rb") as dst:
         if not source.stat().st_size or not target.stat().st_size:
             raise ValueError("The source and target must both be nonempty SPD files.")
         with mmap.mmap(src.fileno(), 0, access=mmap.ACCESS_READ) as donor, mmap.mmap(dst.fileno(), 0, access=mmap.ACCESS_READ) as board:
-            source_layer_range = _layer_range(donor)
-            target_layer_range = _layer_range(board)
-            source_rows = _layer_rows(_read(donor, *source_layer_range))
-            target_rows = _layer_rows(_read(board, *target_layer_range))
-            source_names = _layer_names(source_rows)
-            target_names = _layer_names(target_rows)
-            if source_names != target_names:
-                raise ValueError(f"Stackup mismatch: layer names, types, or order differ ({len(source_names)} vs {len(target_names)} layers).")
-            for label in ("Stackup", "Zone", "ConformalLayer"):
-                donor_text = _description_body(donor, label).strip()
-                if donor_text != _description_body(board, label).strip():
-                    raise ValueError(f"Stackup mismatch: different {label} definitions.")
-                if copy_stackup and donor_text:
-                    raise ValueError(f"Nonempty {label} definitions are not supported for stackup copy.")
-
-            source_nets = _nets(donor)
-            target_nets = _nets(board)
-            if len(source_nets) != len(target_nets):
-                raise ValueError(f"NET count mismatch: source has {len(source_nets)}, target has {len(target_nets)}.")
-            if source_nets.keys() != target_nets.keys():
-                missing = ', '.join(sorted(source_nets.keys() - target_nets.keys())[:3])
-                extra = ', '.join(sorted(target_nets.keys() - source_nets.keys())[:3])
-                raise ValueError(f"NET name mismatch: missing in target: {missing}; target only: {extra}.")
-            for name, net in source_nets.items():
-                if net.group != target_nets[name].group:
-                    raise ValueError(f"NET group mismatch: {name} belongs to a different group in the target.")
-
-            edits: list[_Edit] = []
-            summary = [f"Matched {len(target_names)} layers and {len(target_nets)} NETs."]
             if copy_stackup:
-                if _description_body(donor, "SurfaceRoughness").strip() != _description_body(board, "SurfaceRoughness").strip():
-                    raise ValueError("Different SurfaceRoughness definitions are not supported for stackup copy.")
-                layer_text, required = _copy_layers(source_rows, target_rows)
-                if layer_text != _read(board, *target_layer_range):
-                    edits.append((*target_layer_range, layer_text))
-                edits.extend(_material_edits(donor, board, required))
-                summary.append(f"Copied stackup settings for {len(target_names)} layers.")
+                stackup, count = _stackup_edits(donor, board)
+                edits.extend(stackup)
+                summary.append(f"Copied stackup settings for {count} layers.")
             if copy_activation:
-                activation = [net.change(source_nets[name].disabled) for name, net in target_nets.items()
-                              if net.disabled != source_nets[name].disabled]
+                activation, count = _activation_edits(donor, board)
                 edits.extend(activation)
-                summary.append(f"Changed activation for {len(activation)} NETs.")
-            return sorted(edits), summary
+                summary.extend((f"Matched {count} NETs.", f"Changed activation for {len(activation)} NETs."))
+    return sorted(edits), summary
+
+
+def _stackup_edits(donor: mmap.mmap, board: mmap.mmap) -> tuple[list[_Edit], int]:
+    target_range = _layer_range(board)
+    target_body = _read(board, *target_range)
+    source_rows = _layer_rows(_read(donor, *_layer_range(donor)))
+    target_rows = _layer_rows(target_body)
+    source_names = _layer_names(source_rows)
+    target_names = _layer_names(target_rows)
+    if source_names != target_names:
+        raise ValueError(f"Stackup mismatch: layer names, types, or order differ ({len(source_names)} vs {len(target_names)} layers).")
+    for label in ("Stackup", "Zone", "ConformalLayer"):
+        donor_text = _description_body(donor, label).strip()
+        if donor_text != _description_body(board, label).strip():
+            raise ValueError(f"Stackup mismatch: different {label} definitions.")
+        if donor_text:
+            raise ValueError(f"Nonempty {label} definitions are not supported for stackup copy.")
+    if _description_body(donor, "SurfaceRoughness").strip() != _description_body(board, "SurfaceRoughness").strip():
+        raise ValueError("Different SurfaceRoughness definitions are not supported for stackup copy.")
+    layer_text, required = _copy_layers(source_rows, target_rows)
+    edits = [(*target_range, layer_text)] if layer_text != target_body else []
+    edits.extend(_material_edits(donor, board, required))
+    return edits, len(target_names)
+
+
+def _activation_edits(donor: mmap.mmap, board: mmap.mmap) -> tuple[list[_Edit], int]:
+    source_nets = _nets(donor)
+    target_nets = _nets(board)
+    if len(source_nets) != len(target_nets):
+        raise ValueError(f"NET count mismatch: source has {len(source_nets)}, target has {len(target_nets)}.")
+    if source_nets.keys() != target_nets.keys():
+        missing = ', '.join(sorted(source_nets.keys() - target_nets.keys())[:3])
+        extra = ', '.join(sorted(target_nets.keys() - source_nets.keys())[:3])
+        raise ValueError(f"NET name mismatch: missing in target: {missing}; target only: {extra}.")
+    edits = []
+    for name, net in target_nets.items():
+        source_net = source_nets[name]
+        if net.group != source_net.group:
+            raise ValueError(f"NET group mismatch: {name} belongs to a different group in the target.")
+        if net.disabled != source_net.disabled:
+            edits.append(net.change(source_net.disabled))
+    return edits, len(target_nets)
 
 
 def _markers(data: mmap.mmap, marker: bytes, suffix: bytes = b"\r\n") -> int | None:

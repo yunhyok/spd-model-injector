@@ -62,7 +62,8 @@ def test_settings_can_be_copied_independently(paths, setting):
     result = output.read_text(encoding="utf-8")
     assert ("Signal$TOP Thickness = 24u" in result) == (setting == "stackup")
     assert ("SIG::Unselected Color = RED" in result) == (setting == "channel_activation")
-    assert ("CAP_TUNED" in result) == (setting == "component_models")
+    assert ("Cbase 1 2 1u" in result) == (setting == "component_models")
+    assert "CAP_TUNED" not in result
     assert ("Port7_C1::SIG Disabled Auto RefZ = 55" in result) == (setting == "ports")
     assert "Node20!!1::SIG X = 9mm Y = 2mm" in result
     assert "1 $Package.Node20!!1::SIG\n2 $Package.Node21!!2::GND\n.EndC" in result
@@ -71,56 +72,52 @@ def test_settings_can_be_copied_independently(paths, setting):
     assert (source.read_bytes(), target.read_bytes()) == originals
 
 
-def test_copies_model_body_clone_assignment_and_activation(paths):
+def test_applies_matching_model_without_copying_assignments_or_activation(paths):
     source, target, output = paths
-    copy_spd_settings(source, target, output, _MODELS_ONLY)
+    summary = copy_spd_settings(source, target, output, _MODELS_ONLY)
 
     inventory = scan_spd_inventory(output)
     assert {block.component_name: read_block_body(output, block) for block in inventory.blocks} == {
-        "CAP": "Cbase 1 2 1u\n", "CAP_TUNED": "Ctune 1 2 10u\n",
+        "CAP": "Cbase 1 2 1u\n",
     }
     refdes, = inventory.refdes_records
-    assert (refdes.refdes_name, refdes.component_name, refdes.activation_status) == ("C1", "CAP_TUNED", "Disabled")
+    assert (refdes.refdes_name, refdes.component_name, refdes.activation_status) == ("C1", "CAP", "Enabled")
     assert "Checked = 1" in refdes.connect_line
-    assert '.Part CAP_TUNED Outline = 1mm 2mm Tags = "DISCRETE"' in output.read_text(encoding="utf-8")
+    assert "CAP_TUNED" not in output.read_text(encoding="utf-8")
     port, = inventory.port_records
-    assert (port.name, port.component_name, port.enabled) == ("Port2_C1::SIG", "CAP_TUNED", True)
+    assert (port.name, port.component_name, port.enabled) == ("Port2_C1::SIG", "CAP", True)
+    assert "1 source-only" in " ".join(summary)
 
 
-def test_copies_usage_from_connect_continuation_while_preserving_target_flags(paths):
+def test_model_copy_preserves_complete_target_connect_record(paths):
     source, target, output = paths
     source.write_bytes(source.read_bytes().replace(b"CAP_TUNED Usage", b"CAP_TUNED\n+            Usage"))
     target.write_bytes(target.read_bytes().replace(b"CAP Usage", b"CAP\r\n+            Usage"))
     copy_spd_settings(source, target, output, _MODELS_ONLY)
-
-    connect = output.read_text(encoding="utf-8").split(".Connect C1 ", 1)[1].split("\n.EndC", 1)[0]
-    assert connect.startswith("CAP_TUNED")
-    assert connect.count("Usage = 0b111000") == 1
-    assert "0b1000" not in connect
-    assert "Checked = 1" in connect and "Checked = 0" not in connect
-    assert "1 $Package.Node20!!1::SIG\n2 $Package.Node21!!2::GND" in connect
+    assert output.read_text(encoding="utf-8") == target.read_text(encoding="utf-8").replace("Cbase 1 2 2u", "Cbase 1 2 1u")
 
 
-def test_rejects_cloning_donor_part_with_different_geometry(paths):
+def test_model_copy_ignores_donor_only_parts_and_geometry(paths):
     source, target, output = paths
     source.write_bytes(source.read_bytes().replace(b".Part CAP_TUNED Outline = 1mm", b".Part CAP_TUNED Outline = 6mm"))
-    with pytest.raises(ValueError, match=r"(?i)geometry|\.part"):
-        copy_spd_settings(source, target, output, _MODELS_ONLY)
-    assert not output.exists()
+    copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert output.read_text(encoding="utf-8") == target.read_text(encoding="utf-8").replace("Cbase 1 2 2u", "Cbase 1 2 1u")
 
 
-def test_rejects_existing_model_assignment_with_different_part_geometry(paths):
+def test_same_component_model_applies_despite_different_part_geometry(paths):
     source, target, output = paths
     with target.open("ab") as handle:
         handle.write(b'.Part CAP_TUNED Outline = 6mm 7mm Tags = "DISCRETE"\r\n'
                      b'.PartialCkt CAP_TUNED ExtNode = 1 2\r\nC1 1 2 3u\r\n.EndPartialCkt\r\n')
-    with pytest.raises(ValueError, match="geometry differs"):
-        copy_spd_settings(source, target, output, _MODELS_ONLY)
-    assert not output.exists()
+    copy_spd_settings(source, target, output, _MODELS_ONLY)
+    result = output.read_text(encoding="utf-8")
+    assert '.Part CAP_TUNED Outline = 6mm 7mm Tags = "DISCRETE"' in result
+    assert "Ctune 1 2 10u" in result
+    assert ".Connect C1 CAP Usage = 0b1000" in result
 
 
 @pytest.mark.parametrize(("extra", "options"), [
-    (b".port\r\n.endport\r\n", _MODELS_ONLY),
+    (b".port\r\n.endport\r\n", _PORTS_ONLY),
     (b".netlist\r\nOTHER\r\n.endnetlist\r\n", CopySettingsOptions(False, True, False, False)),
     (b"  .NetList\r\nOTHER\r\n  .EndNetList\r\n", CopySettingsOptions(False, True, False, False)),
 ])
@@ -133,15 +130,101 @@ def test_rejects_noncanonical_duplicate_sections(paths, extra, options):
     assert not output.exists()
 
 
-def test_model_copy_updates_linked_port_header_without_parsing_target_terminals(paths):
+def test_model_copy_does_not_parse_or_change_unselected_ports(paths):
     source, target, output = paths
     terminal = b"+ PositiveTerminal Node20!!1::SIG\r\n"
     target.write_bytes(target.read_bytes().replace(b"+ PositiveTerminal $Package.Node20!!1::SIG\r\n", terminal))
     copy_spd_settings(source, target, output, _MODELS_ONLY)
 
     port, = scan_spd_inventory(output).port_records
-    assert (port.name, port.component_name, port.enabled) == ("Port2_C1::SIG", "CAP_TUNED", True)
+    assert (port.name, port.component_name, port.enabled) == ("Port2_C1::SIG", "CAP", True)
     assert terminal.replace(b"\r\n", b"\n") in output.read_bytes()
+
+
+def test_model_only_copy_accepts_changed_drawing_and_refdes_lists(paths):
+    source, target, output = paths
+    changed = (target.read_text(encoding="utf-8").replace("C1", "C99")
+               .replace("Medium$D1", "Medium$DIFFERENT").replace("SIG", "NEW_NET"))
+    changed += ".Connect C100 CAP Usage = 0b111000\n1 $Package.Node99::EXTRA\n.EndC\n"
+    target.write_text(changed, encoding="utf-8")
+    copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert output.read_text(encoding="utf-8") == changed.replace("Cbase 1 2 2u", "Cbase 1 2 1u")
+
+
+def test_models_can_be_applied_without_unrelated_sections(tmp_path):
+    source, target, output = (tmp_path / name for name in ("source.spd", "target.spd", "out.spd"))
+    source.write_text(".PartialCkt CAP ExtNode = 1 2\nC1 1 2 10u\n.EndPartialCkt\n", encoding="utf-8")
+    target.write_text(".PartialCkt CAP ExtNode = 1 2\n.EndPartialCkt\n", encoding="utf-8")
+    copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert output.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+
+
+def test_empty_donor_models_and_target_only_models_are_preserved(paths):
+    source, target, output = paths
+    source.write_bytes(source.read_bytes().replace(b"Cbase 1 2 1u", b"* no model assigned"))
+    with target.open("ab") as handle:
+        handle.write(b".PartialCkt CAP_TUNED ExtNode = 1 2\n.EndPartialCkt\n"
+                     b".PartialCkt NEW_CAP ExtNode = 1 2\nCnew 1 2 3u\n.EndPartialCkt\n")
+    summary = copy_spd_settings(source, target, output, _MODELS_ONLY)
+    result = output.read_text(encoding="utf-8")
+    assert "Cbase 1 2 2u" in result and "Ctune 1 2 10u" in result and "Cnew 1 2 3u" in result
+    assert "1 empty" in " ".join(summary) and "1 target-only" in " ".join(summary)
+
+
+@pytest.mark.parametrize("target_nodes, expected", [
+    ("A B", "Cbase A B 1u"), ("2 1", "Cbase 1 2 1u"), ("2 3", "Cbase 3 2 1u"),
+])
+def test_model_pins_map_by_name_or_import_order(paths, target_nodes, expected):
+    source, target, output = paths
+    target.write_bytes(target.read_bytes().replace(b"CAP ExtNode = 1 2", f"CAP ExtNode = {target_nodes}".encode()))
+    copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert expected in output.read_text(encoding="utf-8")
+    assert f".PartialCkt CAP ExtNode = {target_nodes}" in output.read_text(encoding="utf-8")
+
+
+def test_model_copy_preserves_vendor_spice_with_matching_pin_names(paths):
+    source, target, output = paths
+    body = b"D1 1 2 vendor\n.MODEL vendor D(IS=1e-14)"
+    source.write_bytes(source.read_bytes().replace(b"Cbase 1 2 1u", body))
+    copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert body in output.read_bytes()
+
+
+@pytest.mark.parametrize("target_nodes", ["1 2 3", "A A", "A ;B"])
+def test_incompatible_model_pins_preserve_existing_output(paths, target_nodes):
+    source, target, output = paths
+    target.write_bytes(target.read_bytes().replace(b"CAP ExtNode = 1 2", f"CAP ExtNode = {target_nodes}".encode()))
+    output.write_bytes(b"previous output")
+    with pytest.raises(ValueError, match="(?i)pin|port count|ExtNode"):
+        copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert output.read_bytes() == b"previous output"
+
+
+@pytest.mark.parametrize("body, nodes, message", [
+    (b".include external.mod", b"1 2", "external"),
+    (b".SUBCKT nested 1 2\nR1 1 2 3\n.ENDS nested", b"1 2", "structural"),
+    (b"D1 1 2 vendor", b"A B", "[Uu]nsupported"),
+    (b"R1 1 A 2\nC1 A 2 1u", b"A B", "collides"),
+])
+def test_unsafe_models_stop_before_writing(paths, body, nodes, message):
+    source, target, output = paths
+    source.write_bytes(source.read_bytes().replace(b"Cbase 1 2 1u", body))
+    target.write_bytes(target.read_bytes().replace(b"CAP ExtNode = 1 2", b"CAP ExtNode = " + nodes))
+    with pytest.raises(ValueError, match=message):
+        copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("replacement", [b"* empty model", b"Cbase 1 2 1u"])
+def test_no_applicable_model_reports_reason(paths, replacement):
+    source, target, output = paths
+    raw = source.read_bytes().replace(b"Cbase 1 2 1u", replacement)
+    if replacement.startswith(b"C"):
+        raw = raw.replace(b"CAP ExtNode", b"OTHER ExtNode")
+    source.write_bytes(raw)
+    with pytest.raises(ValueError, match="No nonempty.*matching component"):
+        copy_spd_settings(source, target, output, _MODELS_ONLY)
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("copy_models", (False, True))
@@ -153,12 +236,12 @@ def test_ports_retain_properties_and_use_matching_target_pins(paths, copy_models
     port, = scan_spd_inventory(output).port_records
     assert port.name == "Port7_C1::SIG"
     assert port.instance == "C1"
-    assert port.component_name == ("CAP_TUNED" if copy_models else "CAP")
+    assert port.component_name == "CAP"
     assert not port.enabled
     assert "Auto RefZ = 55" in port.header_line
     result = output.read_text(encoding="utf-8")
-    assert "+ PositiveTerminal $Package.Node20!!1::SIG\n" in result
-    assert "+ NegativeTerminal $Package.Node21!!2::GND\n" in result
+    assert "PositiveTerminal $Package.Node20!!1::SIG\n" in result
+    assert "NegativeTerminal $Package.Node21!!2::GND\n" in result
     assert "Port2_C1::SIG" not in result
 
 
@@ -170,7 +253,7 @@ def test_port_node_replacements_skip_comments(paths):
 
     result = output.read_bytes()
     assert comment in result
-    assert b"+ PositiveTerminal $Package.Node20!!1::SIG\n" in result
+    assert b"PositiveTerminal $Package.Node20!!1::SIG\n" in result
 
 
 def test_copies_ports_when_target_has_no_port_section(paths):
@@ -182,15 +265,24 @@ def test_copies_ports_when_target_has_no_port_section(paths):
 
     port, = scan_spd_inventory(output).port_records
     assert port.name == "Port7_C1::SIG"
-    assert b"+ PositiveTerminal $Package.Node20!!1::SIG\n" in output.read_bytes()
+    assert b"PositiveTerminal $Package.Node20!!1::SIG\n" in output.read_bytes()
+
+
+def test_port_copy_replaces_unsupported_old_target_terminals(paths):
+    source, target, output = paths
+    original = target.read_bytes().replace(b"+ PositiveTerminal $Package.Node20!!1::SIG", b"+ PositiveTerminal $OtherPackage.Node20")
+    target.write_bytes(original)
+    copy_spd_settings(source, target, output, _PORTS_ONLY)
+    assert target.read_bytes() == original
+    assert "PositiveTerminal $Package.Node20!!1::SIG" in output.read_text(encoding="utf-8")
+    assert "$OtherPackage" not in output.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(("before", "after", "message"), (
     ("Medium$D1", "Medium$D2", "Stackup mismatch"),
     ("SIG Color", "OTHER Color", "NET name mismatch"),
     ("\tSIG Color = RED\n", "\tSIG Color = RED\n\tOTHER Color = RED\n", "NET count mismatch"),
-    ("1 $Package.Node20!!1::SIG", "1 $Package.Node20!!1::GND", "pin/NET mismatch"),
-    ("2 $Package.Node21!!2::GND\n.EndC", "3 $Package.Node21!!2::GND\n.EndC", "pin/NET mismatch"),
+    ("1 $Package.Node20!!1::SIG", "1 $Package.Node20!!1::GND", "NET"),
 ))
 def test_mismatch_leaves_both_inputs_and_existing_output_intact(paths, before, after, message):
     source, target, output = paths
