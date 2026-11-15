@@ -733,11 +733,9 @@ def read_block_body(path: str | Path, block: PartialCktBlock) -> str:
     return _normalize_newlines(raw.decode("utf-8", errors="replace"))
 
 
-def export_spice_model(source_path: str | Path, output_path: str | Path, block: PartialCktBlock) -> None:
-    """Export one original scanned PartialCkt body with a SPICE subcircuit wrapper."""
+def read_spice_model(source_path: str | Path, block: PartialCktBlock) -> str:
+    """Read and validate an original PartialCkt as a standalone SPICE subcircuit."""
     source = Path(source_path)
-    output = Path(output_path)
-    _ensure_output_is_not_source(source, output)
     source_signature = _source_signature(source)
     if block.source_signature is None or block.source_signature != source_signature:
         raise ValueError("SPD file or metadata changed since scan; reload before exporting.")
@@ -781,9 +779,16 @@ def export_spice_model(source_path: str | Path, output_path: str | Path, block: 
     safe_name = re.sub(r"[^A-Za-z0-9_]", "_", block.component_name)
     if safe_name[0].isdigit():
         safe_name = "SPD_" + safe_name
-    model = (f"* Original SPD component: {block.component_name}\n"
-             f".SUBCKT {safe_name} {' '.join(ext_nodes)}\n"
-             + _normalize_model_text(body) + f".ENDS {safe_name}\n")
+    return (f".SUBCKT {safe_name} {' '.join(ext_nodes)}\n"
+            + _normalize_model_text(body) + f".ENDS {safe_name}\n")
+
+
+def export_spice_model(source_path: str | Path, output_path: str | Path, block: PartialCktBlock) -> None:
+    """Export one original scanned PartialCkt body with a SPICE subcircuit wrapper."""
+    source, output = Path(source_path), Path(output_path)
+    _ensure_output_is_not_source(source, output)
+    model = f"* Original SPD component: {block.component_name}\n" + read_spice_model(source, block)
+    source_signature = block.source_signature
     temporary_path: Path | None = None
     try:
         with NamedTemporaryFile(

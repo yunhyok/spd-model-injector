@@ -72,11 +72,37 @@ def test_transfers_physical_stackup_and_activation_without_copying_board_data(tm
     (_LAYERS, _NETS.replace("PowerNets", "GroundNets"), "NET group mismatch"),
     (_LAYERS, _NETS + "SIG Color = BLUE\n", "Duplicate NET name"),
 ])
-def test_requires_matching_structure_even_when_copying_other_settings(tmp_path, layers, nets, message):
+def test_requires_matching_structure_for_selected_category(tmp_path, layers, nets, message):
     source = _board(tmp_path / "source.spd", layers=layers, nets=nets)
     target = _board(tmp_path / "target.spd")
     with pytest.raises(ValueError, match=message):
-        build_structure_edits(source, target, copy_stackup=False, copy_activation=False)
+        build_structure_edits(source, target, copy_stackup=layers != _LAYERS, copy_activation=nets != _NETS)
+
+
+def test_structure_is_not_parsed_when_neither_category_is_selected(tmp_path):
+    assert build_structure_edits(tmp_path / "missing-source.spd", tmp_path / "missing-target.spd",
+                                 copy_stackup=False, copy_activation=False) == ([], [])
+
+
+def test_stackup_only_ignores_incompatible_nets(tmp_path):
+    source = _board(tmp_path / "source.spd", layers=_LAYERS.replace("20u", "21u"), nets="OTHER Color = RED\n")
+    target = _board(tmp_path / "target.spd")
+    edits, summary = build_structure_edits(source, target, copy_stackup=True, copy_activation=False)
+    (start, end, text), = edits
+    assert "Thickness = 21u" in text
+    assert ".NetList" not in target.read_bytes()[start:end].decode()
+    assert summary == ["Copied stackup settings for 3 layers."]
+
+
+def test_activation_only_ignores_incompatible_layers(tmp_path):
+    source = _board(tmp_path / "source.spd", layers=_LAYERS.replace("Medium$DIEL", "Medium$OTHER"),
+                    nets=_NETS.replace("SIG::Unselected", "SIG"))
+    target = _board(tmp_path / "target.spd")
+    edits, summary = build_structure_edits(source, target, copy_stackup=False, copy_activation=True)
+    (start, end, text), = edits
+    assert text == "\tSIG||DropShape Color = RED\n"
+    assert target.read_bytes()[start:end].decode() == "\tSIG::Unselected||DropShape Color = RED\n"
+    assert summary == ["Matched 4 NETs.", "Changed activation for 1 NETs."]
 
 
 def test_rejects_material_only_available_from_a_different_external_file(tmp_path):
@@ -112,7 +138,7 @@ def test_signed_net_names_are_channels_and_keep_their_activation_flags(tmp_path)
     text = result.decode().replace("\r\n", "\n")
     assert "+3_3V::Unselected||DropShape Color = RED" in text
     assert "+5V -> PowerNets::Unselected||DropShape Voltage = 0.9 GroundNet = GND" in text
-    assert "Matched 3 layers and 4 NETs." in summary
+    assert "Matched 4 NETs." in summary
     assert "Changed activation for 2 NETs." in summary
 
 

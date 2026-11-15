@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import mmap
 import os
 from pathlib import Path
 import re
@@ -9,14 +8,18 @@ from tempfile import NamedTemporaryFile
 
 from spd_model_injector.core.spd import (
     ProgressCallback,
+    _PROPERTY_RE,
     _copy_range,
     _ensure_output_is_not_source,
+    _format_port_terminal,
     _normalize_newlines,
-    _replace_connect_component,
+    _package_node_sort_key,
+    read_spice_model,
     _source_signature,
     scan_spd_inventory,
 )
 from spd_model_injector.core.settings_transfer_structure import build_structure_edits
+from spd_model_injector.core.spice import prepare_model_for_partialckt
 
 
 @dataclass(frozen=True)
@@ -76,178 +79,233 @@ def _pins(handle, record) -> dict[str, tuple[str, str]]:
     return pins
 
 
-def _part_entries(path: Path) -> dict[str, tuple[int, int, str]]:
-    entries = {}
-    with path.open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
-        for match in re.finditer(rb"(?im)^\.Part[ \t]+([^\s]+)[^\r\n]*(?:\r?\n[ \t]*\+[^\r\n]*)*(?:\r?\n|$)", data):
-            name = match[1].decode("utf-8")
-            if name in entries:
-                raise ValueError(f"Duplicate .Part definition: {name}.")
-            entries[name] = (match.start(), match.end(), _normalize_newlines(match[0].decode("utf-8")))
-    return entries
-
-
-def _model_edits(source, target, src_inv, dst_inv, src_refs, dst_refs):
+def _model_edits(source, src_inv, dst_inv):
     source_models = _unique(src_inv.blocks, "component_name", "source component model")
     target_models = _unique(dst_inv.blocks, "component_name", "target component model")
-    if set(src_refs) != set(dst_refs):
-        missing = sorted(set(src_refs) - set(dst_refs))[:5]
-        extra = sorted(set(dst_refs) - set(src_refs))[:5]
-        raise ValueError(f"RefDes names/count differ. Missing in target: {missing}; target-only: {extra}.")
-    if not source_models:
-        raise ValueError("Source contains no component models to copy.")
-    edits = []
-    with source.open("rb") as src, target.open("rb") as dst:
-        for name, source_record in src_refs.items():
-            target_record = dst_refs[name]
-            source_pins, target_pins = _pins(src, source_record), _pins(dst, target_record)
-            if {p: n for p, (_, n) in source_pins.items()} != {p: n for p, (_, n) in target_pins.items()}:
-                raise ValueError(f"RefDes pin/NET mismatch: {name}.")
-            model = source_models.get(source_record.component_name)
-            if model is None or not set(source_pins).issubset(model.ext_nodes):
-                raise ValueError(f"Missing or incompatible component model for RefDes {name}.")
-            # Keep target placement/pins and non-model flags; Usage is the model activation setting.
-            source_header, _ = _connect_header(src, source_record)
-            target_header, header_end = _connect_header(dst, target_record)
-            header = _replace_connect_component(target_header, source_record.component_name)
-            header = re.sub(r"\s+Usage\s*=\s*\S+", "", header, flags=re.I).rstrip("\r\n")
-            usage = re.search(r"\bUsage\s*=\s*(\S+)", source_header, re.I)
-            if usage:
-                header += f" Usage = {usage[1]}"
-            edits.append((target_record.connect_line_start_offset, header_end, header + "\n"))
-        additions = []
-        for name, model in source_models.items():
-            if not model.ext_nodes or len(set(model.ext_nodes)) != len(model.ext_nodes):
-                raise ValueError(f"Invalid ExtNode pins for component model {name}.")
-            text = _text(src, model.block_start_offset, model.block_end_offset)
-            if re.search(r"(?im)^\s*\.(?:include|inc|lib)\b", text):
+    edits, empty = [], 0
+    with source.open("rb") as src:
+        for name in sorted(source_models.keys() & target_models.keys()):
+            model, target = source_models[name], target_models[name]
+            body = _text(src, model.body_start_offset, model.body_end_offset)
+            if not any(line.strip() and not line.lstrip().startswith(("*", ";", "$")) for line in body.splitlines()):
+                empty += 1
+                continue
+            if re.search(r"(?im)^\s*\.(?:include|inc|lib)\b", body):
                 raise ValueError(f"Model {name} references an external .include/.lib file. Embed its model before copying settings.")
-            if name in target_models:
-                existing = target_models[name]
-                if model.ext_nodes != existing.ext_nodes:
-                    raise ValueError(f"Component ExtNode names/order differ: {name}.")
-                edits.append((existing.body_start_offset, existing.body_end_offset,
-                              _text(src, model.body_start_offset, model.body_end_offset)))
-            else:
-                additions.append(text if text.endswith("\n") else text + "\n")
-    assignments = [name for name in src_refs if src_refs[name].component_name != dst_refs[name].component_name]
-    if additions or assignments:
-        source_parts, target_parts = _part_entries(source), _part_entries(target)
-        for refdes in assignments:
-            new_name = src_refs[refdes].component_name
-            old_part = target_parts.get(dst_refs[refdes].component_name)
-            new_part = target_parts.get(new_name) if new_name in target_models else source_parts.get(new_name)
-            if old_part is None or new_part is None or old_part[2].split()[2:] != new_part[2].split()[2:]:
-                raise ValueError(f"Component assignment .Part geometry differs for RefDes {refdes}; copy stopped.")
-    if additions:
-        extra_models = source_models.keys() - target_models.keys()
-        if not dst_inv.blocks or not target_parts or any(name not in source_parts or name in target_parts for name in extra_models):
-            raise ValueError("New component models require unique .Part definitions and an existing target model library.")
-        part_offset = max(end for _, end, _ in target_parts.values())
-        edits.append((part_offset, part_offset, "".join(source_parts[name][2] for name in sorted(extra_models))))
-        model_offset = max(block.block_end_offset for block in dst_inv.blocks)
-        edits.append((model_offset, model_offset, "\n" + "".join(additions)))
-    return edits, f"Copied {len(source_models)} component models and assignments/activation for {len(src_refs)} RefDes instances."
+            try:
+                spice = read_spice_model(source, model)
+                nodes = target.ext_nodes
+                if (not nodes or len({node.casefold() for node in nodes}) != len(nodes)
+                        or any(not node.isprintable() or node.startswith(("*", "$"))
+                               or re.search(r"[\s,();=\"']", node) for node in nodes)):
+                    raise ValueError("Target ExtNode pins must be distinct valid SPICE node tokens.")
+                if len(model.ext_nodes) != len(nodes):
+                    raise ValueError(f"ExtNode pin count differs ({len(model.ext_nodes)} vs {len(nodes)}).")
+                # Preserve shared pin names; match only renamed pins by their remaining order.
+                source_names = {node.casefold() for node in model.ext_nodes}
+                target_names = {node.casefold(): node for node in nodes}
+                if source_names != target_names.keys():
+                    remaining = iter(node for node in nodes if node.casefold() not in source_names)
+                    mapped = [target_names[node.casefold()] if node.casefold() in target_names else next(remaining)
+                              for node in model.ext_nodes]
+                    body = prepare_model_for_partialckt(spice, mapped)
+            except ValueError as exc:
+                raise ValueError(f"Cannot apply component model {name}: {exc}") from exc
+            edits.append((target.body_start_offset, target.body_end_offset, body))
+    source_only = len(source_models.keys() - target_models.keys())
+    target_only = len(target_models.keys() - source_models.keys())
+    detail = (f"Applied {len(edits)} matching component models. Skipped {source_only} source-only and {empty} empty models; "
+              f"preserved {target_only} target-only models and all target RefDes assignments/activation.")
+    if not edits:
+        raise ValueError("No nonempty source models have matching component names in the target. " + detail)
+    return edits, detail
 
 
-def _port_text(path, inventory) -> str:
+_PORT_NODE = re.compile(r"\$Package\.Node\S+", re.I)
+
+
+@dataclass
+class _Port:
+    name: str
+    header_index: int
+    terminals: dict[str, list[tuple[int, list[str]]]]
+
+
+def _port_lines(path, inventory) -> list[str]:
     if inventory.port_section_start_offset is None and inventory.port_section_end_offset is None:
         if inventory.port_insertion_offset is None:
             raise ValueError("Missing or malformed Port/NetList section.")
-        return ".Port\n.EndPort\n"
+        return [".Port\n", ".EndPort\n"]
     if inventory.port_section_start_offset is None or inventory.port_section_end_offset is None or inventory.port_insertion_offset is None:
         raise ValueError("Malformed or multiple Port sections.")
     with path.open("rb") as handle:
         text = _text(handle, inventory.port_section_start_offset, inventory.port_section_end_offset)
-    lines = text.splitlines()
+    lines = text.splitlines(keepends=True)
     if lines[0].strip() != ".Port" or lines[-1].strip() != ".EndPort":
         raise ValueError("Unsupported Port section header/end marker.")
+    return lines
+
+
+def _port_text(path, inventory) -> tuple[list[str], list[_Port]]:
+    lines = _port_lines(path, inventory)
     names = set()
-    terminals = None
+    ports: list[_Port] = []
     current_terminal = None
-    declared = set()
-    for line in lines[1:-1]:
+    for index, line in enumerate(lines[1:-1], start=1):
         if not line.strip() or line.lstrip().startswith("*"):
             continue
         header = re.match(r"^(Port\d+\S*)(?:\s|$)", line, re.I)
         if header:
-            if terminals is not None and (not terminals["positive"] or not terminals["negative"]):
-                raise ValueError("Each Port must have nonempty positive and negative terminals.")
             if header[1] in names:
                 raise ValueError(f"Duplicate Port name: {header[1]}.")
             names.add(header[1])
-            terminals = {"positive": [], "negative": []}
-            declared = set()
+            ports.append(_Port(header[1], index, {}))
             current_terminal = None
             continue
-        if terminals is None or not line.lstrip().startswith("+"):
+        if not ports or not line.lstrip().startswith("+"):
             raise ValueError(f"Unsupported Port record: {line.strip()}")
+        terminals = ports[-1].terminals
         content = line.lstrip()[1:].strip()
         terminal = re.match(r"(Positive|Negative)Terminal\b\s*(.*)", content, re.I)
         if terminal:
             current_terminal, content = terminal[1].lower(), terminal[2]
-            if current_terminal in declared:
+            if current_terminal in terminals:
                 raise ValueError("Duplicate Port terminal declaration.")
-            declared.add(current_terminal)
+            terminals[current_terminal] = []
         tokens = content.split()
-        if current_terminal is None or any(not re.fullmatch(r"\$Package\.Node\S+", token, re.I) for token in tokens):
+        if current_terminal is None or any(not _PORT_NODE.fullmatch(token) for token in tokens):
             raise ValueError("Port terminals must reference identifiable Package.Node pins.")
-        terminals[current_terminal].extend(tokens)
-    if terminals is not None and (not terminals["positive"] or not terminals["negative"]):
-        raise ValueError("Each Port must have nonempty positive and negative terminals.")
+        terminals[current_terminal].append((index, tokens))
+    for port in ports:
+        if not all(any(tokens for _, tokens in port.terminals.get(side, [])) for side in ("positive", "negative")):
+            raise ValueError("Each Port must have nonempty positive and negative terminals.")
     if len(names) != len(inventory.port_records):
         raise ValueError("Port records are ambiguous; copy stopped.")
-    return text
+    return lines, ports
 
 
-def _port_models(text: str, references: dict) -> str:
-    lines = []
-    for line in text.splitlines(keepends=True):
-        if re.match(r"^Port\d", line, re.I):
-            instance = re.search(r'\bGenFromCktInstance\s*=\s*"([^"]+)"', line, re.I)
-            model = re.search(r'\bGenFromCktModel\s*=\s*"([^"]+)"', line, re.I)
-            if instance or model:
-                if not instance or not model or instance[1] not in references:
-                    raise ValueError("Port refers to a missing or ambiguous RefDes/model.")
-                name = references[instance[1]].component_name
-                line = line[:model.start(1)] + name + line[model.end(1):]
-        lines.append(line)
-    return "".join(lines)
+def _port_models(line: str, source_refs: dict, target_refs: dict) -> tuple[str, str | None]:
+    name = line.split(maxsplit=1)[0]
+    linked = [match for match in _PROPERTY_RE.finditer(line, len(name))
+              if match[1].lower() in {"genfromcktinstance", "genfromcktmodel"}]
+    if not linked:
+        return line, None
+    metadata = {match[1].lower(): match for match in linked}
+    if len(linked) != 2 or len(metadata) != 2 or any(not re.fullmatch(r'"[^"]+"', match[2]) for match in linked):
+        raise ValueError(f"Port {name} has malformed GenFromCktInstance/GenFromCktModel attributes.")
+    instance = metadata["genfromcktinstance"][2][1:-1]
+    if instance not in source_refs or instance not in target_refs:
+        raise ValueError(f"Port {name} refers to a missing RefDes: {instance}.")
+    model = metadata["genfromcktmodel"]
+    component = target_refs[instance].component_name
+    return line[:model.start(2)] + f'"{component}"' + line[model.end(2):], instance
 
 
-def _port_edits(source, target, src_inv, dst_inv, src_refs, dst_refs, copy_models):
-    text = _port_text(source, src_inv)
-    _port_text(target, dst_inv)
-    wanted = {token for line in text.splitlines() if line.lstrip().startswith("+")
-              for token in re.findall(r"\$Package\.Node\S+", line, re.I)}
-    node_map: dict[str, set[str]] = {}
+def _check_port_nodes(name: str, terminals: dict[str, list[str]]) -> None:
+    nodes = [re.split(r"!!|::", token, maxsplit=1)[0].casefold()
+             for tokens in terminals.values() for token in tokens]
+    if len(set(nodes)) != len(nodes):
+        raise ValueError(f"Port {name} has duplicate or overlapping terminal nodes.")
+
+
+def _generated_port_nets(instance, terminals, owners, source_pins) -> dict[str, str]:
+    # Only complete instance-local NET selections can be regenerated as a recipe.
+    if instance is None or instance not in source_pins:
+        return {}
+    nets = {}
+    for side, tokens in terminals.items():
+        group = [[(pin, net) for ref, pin, net in owners.get(token, []) if ref == instance] for token in tokens]
+        if any(len(candidates) != 1 for candidates in group):
+            return {}
+        selected = {candidates[0][0] for candidates in group}
+        unique_nets = {candidates[0][1] for candidates in group}
+        if len(unique_nets) != 1 or "" in unique_nets:
+            return {}
+        net = next(iter(unique_nets))
+        if selected != {pin for pin, (_, pin_net) in source_pins[instance].items() if pin_net == net}:
+            return {}
+        nets[side] = net
+    return nets if nets["positive"] != nets["negative"] else {}
+
+
+def _port_edits(source, target, src_inv, dst_inv, src_refs, dst_refs):
+    lines, ports = _port_text(source, src_inv)
+    _port_lines(target, dst_inv)
+    wanted = {token for port in ports for rows in port.terminals.values() for _, tokens in rows for token in tokens}
+    owners: dict[str, list[tuple[str, str, str]]] = {}
+    source_pins = {}
+    target_pins = {}
+    node_count = 0
     with source.open("rb") as src, target.open("rb") as dst:
-        for name, record in src_refs.items():
-            source_pins = _pins(src, record)
-            used = {pin: value for pin, value in source_pins.items()
-                    if value[0] in wanted or value[0].split("::", 1)[0] in wanted}
-            if not used:
-                continue
+
+        def pins_for(name):
             if name not in dst_refs:
                 raise ValueError(f"Port RefDes missing in target: {name}.")
-            target_pins = _pins(dst, dst_refs[name])
-            for pin, (old, net) in used.items():
-                if pin not in target_pins or not net or target_pins[pin][1] != net:
-                    raise ValueError(f"Port pin/NET mismatch: {name}.{pin}.")
-                new = target_pins[pin][0]
-                for key in (old, old.split("::", 1)[0]):
-                    node_map.setdefault(key, set()).add(new)
-    for token in wanted:
-        if len(node_map.get(token, ())) != 1:
-            raise ValueError(f"Port node has no unique RefDes/pin match: {token}.")
-    text = "".join(re.sub(r"\$Package\.Node\S+", lambda match: next(iter(node_map[match[0]])), line, flags=re.I)
-                   if line.lstrip().startswith("+") else line for line in text.splitlines(keepends=True))
-    text = _port_models(text, src_refs if copy_models else dst_refs)
+            if name not in target_pins:
+                target_pins[name] = _pins(dst, dst_refs[name])
+            return target_pins[name]
+
+        if wanted:
+            for name, record in src_refs.items():
+                pins = _pins(src, record)
+                for pin, (token, net) in pins.items():
+                    base = token.split("::", 1)[0]
+                    for key in {token, base} & wanted:
+                        owners.setdefault(key, []).append((name, pin, net))
+                        source_pins[name] = pins
+
+        for port in ports:
+            lines[port.header_index], instance = _port_models(lines[port.header_index], src_refs, dst_refs)
+            terminals = {side: [token for _, tokens in rows for token in tokens]
+                         for side, rows in port.terminals.items()}
+            _check_port_nodes(port.name, terminals)
+            port_owners = owners
+            if instance is not None:
+                port_owners = {token: [owner for owner in owners.get(token, []) if owner[0] == instance] or owners.get(token, [])
+                               for tokens in terminals.values() for token in tokens}
+            nets = _generated_port_nets(instance, terminals, port_owners, source_pins)
+            resolved = {}
+            for side, tokens in terminals.items():
+                if nets:
+                    net = nets[side]
+                    resolved[side] = sorted(
+                        (token for token, pin_net in pins_for(instance).values() if pin_net == net),
+                        key=_package_node_sort_key,
+                    )
+                    if not resolved[side]:
+                        raise ValueError(f"Port {port.name} {side} NET {net} is missing on target RefDes {instance}.")
+                else:
+                    mapped = []
+                    for token in tokens:
+                        matches = port_owners.get(token, [])
+                        if len(matches) != 1:
+                            raise ValueError(f"Port node has no unique RefDes/pin match: {token}.")
+                        name, pin, net = matches[0]
+                        target_pin = pins_for(name).get(pin)
+                        if target_pin is None or not net or target_pin[1] != net:
+                            raise ValueError(f"Port pin/NET mismatch: {name}.{pin}.")
+                        mapped.append(target_pin[0])
+                    resolved[side] = mapped
+            _check_port_nodes(port.name, resolved)
+            for side, tokens in resolved.items():
+                rows = port.terminals[side]
+                node_count += len(tokens)
+                if len(tokens) == len(terminals[side]):
+                    new_tokens = iter(tokens)
+                    for index, _ in rows:
+                        lines[index] = _PORT_NODE.sub(lambda _: next(new_tokens), lines[index])
+                else:
+                    index, _ = rows[0]
+                    lines[index] = "".join(_format_port_terminal(f"{side.title()}Terminal", tokens))
+                    for index, _ in rows[1:]:
+                        lines[index] = ""
+
+    text = "".join(lines)
     start = dst_inv.port_section_start_offset
     end = dst_inv.port_section_end_offset
     if start is None:
         start = end = dst_inv.port_insertion_offset
-    return [(start, end, text)], f"Copied {len(src_inv.port_records)} ports and remapped {len(wanted)} terminal node references."
+    return [(start, end, text)], f"Copied {len(ports)} ports with {node_count} target terminal node references."
 
 
 def copy_spd_settings(
@@ -274,7 +332,7 @@ def copy_spd_settings(
         if progress_callback:
             progress_callback(message, current, total)
 
-    progress("Validating layer structure and all NET names/counts")
+    progress("Validating selected stackup and NET activation settings")
     edits, summary = build_structure_edits(source, target, copy_stackup=options.stackup,
                                            copy_activation=options.channel_activation)
     if options.component_models or options.ports:
@@ -282,27 +340,18 @@ def copy_spd_settings(
         src_inv = scan_spd_inventory(source)
         progress("Scanning target models and connections")
         dst_inv = scan_spd_inventory(target)
-        if dst_inv.port_insertion_offset is None:
-            raise ValueError("Malformed or multiple Port sections in target; copy stopped.")
-        src_refs = _unique(src_inv.refdes_records, "refdes_name", "source RefDes")
-        dst_refs = _unique(dst_inv.refdes_records, "refdes_name", "target RefDes")
         if options.component_models:
-            progress("Validating component models and RefDes pins")
-            changes, detail = _model_edits(source, target, src_inv, dst_inv, src_refs, dst_refs)
+            progress("Applying SPICE models to matching component names")
+            changes, detail = _model_edits(source, src_inv, dst_inv)
             edits.extend(changes)
             summary.append(detail)
         if options.ports:
-            progress("Matching Port terminals to target RefDes/pins/NETs")
-            changes, detail = _port_edits(source, target, src_inv, dst_inv, src_refs, dst_refs, options.component_models)
+            progress("Applying Port selections to target RefDes/NET pins")
+            src_refs = _unique(src_inv.refdes_records, "refdes_name", "source RefDes")
+            dst_refs = _unique(dst_inv.refdes_records, "refdes_name", "target RefDes")
+            changes, detail = _port_edits(source, target, src_inv, dst_inv, src_refs, dst_refs)
             edits.extend(changes)
             summary.append(detail)
-        elif options.component_models and dst_inv.port_section_start_offset is not None:
-            with target.open("rb") as handle:
-                for port in dst_inv.port_records:
-                    text = _text(handle, port.header_start_offset, port.header_end_offset)
-                    updated = _port_models(text, src_refs)
-                    if updated != text:
-                        edits.append((port.header_start_offset, port.header_end_offset, updated))
 
     edits.sort(key=lambda edit: (edit[0], edit[1]))
     cursor = 0
