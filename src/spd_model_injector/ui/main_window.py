@@ -827,6 +827,8 @@ class MainWindow(QMainWindow):
         for action in (self.load_action, self.validate_action, self.revert_action, self.export_action):
             action.setEnabled(not busy)
         self.copy_settings_action.setEnabled(not busy and self.spd_path is not None)
+        if self.export_refdes_action is not None:
+            self.export_refdes_action.setEnabled(not busy and bool(self.refdes_records))
         if self.import_refdes_status_action is not None:
             self.import_refdes_status_action.setEnabled(not busy and bool(self.refdes_records))
         if self.undo_component_change_action is not None:
@@ -1715,6 +1717,13 @@ class MainWindow(QMainWindow):
         if self.spd_path is None:
             QMessageBox.warning(self, "Export", "Load an SPD file first.")
             return
+        if self._batch_edit_pending:
+            QMessageBox.warning(
+                self,
+                "Pending Batch Edit",
+                "Use Validate/Convert to apply the pending batch model edit before exporting.",
+            )
+            return
         default_path = str(self.spd_path.parent / f"{self.spd_path.stem}_injected.spd")
         path, _ = QFileDialog.getSaveFileName(self, "Export New SPD", default_path, "SPD files (*.spd);;All files (*)")
         if not path:
@@ -1801,7 +1810,13 @@ class MainWindow(QMainWindow):
             "Excel files (*.xlsx);;All files (*)",
         )
         if path:
-            self.export_refdes_excel(path)
+            try:
+                self.export_refdes_excel(path)
+            except OSError as exc:
+                message = f"RefDes Excel export failed: {exc}"
+                self.status_label.setText(message)
+                self._append_status(message)
+                QMessageBox.warning(self, "Export RefDes Excel", str(exc))
 
     def export_refdes_excel(self, output_path: str | Path) -> None:
         export_refdes_xlsx(output_path, self.effective_refdes_records())
@@ -2814,15 +2829,17 @@ def _read_refdes_component_csv(path: Path) -> list[tuple[int, list[str]]]:
 
 def _read_refdes_component_xlsx(path: Path) -> list[tuple[int, list[str]]]:
     workbook = load_workbook(path, read_only=True, data_only=True)
-    sheet = workbook.worksheets[0]
-    rows: list[tuple[int, list[str]]] = []
-    for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-        values = ["" if value is None else str(value) for value in row]
-        if not any(value.strip() for value in values):
-            continue
-        rows.append((row_number, values))
-    workbook.close()
-    return rows
+    try:
+        sheet = workbook.worksheets[0]
+        rows: list[tuple[int, list[str]]] = []
+        for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            values = ["" if value is None else str(value) for value in row]
+            if not any(value.strip() for value in values):
+                continue
+            rows.append((row_number, values))
+        return rows
+    finally:
+        workbook.close()
 
 
 def _read_refdes_rows(path: Path) -> list[tuple[int, list[str]]]:

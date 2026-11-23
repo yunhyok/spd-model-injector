@@ -12,7 +12,7 @@ The app scans `.PartialCkt` / `.EndPartialCkt` blocks, lets you select a compone
 - Export an existing embedded SPICE model to a standalone `.mod` file.
 - Show RefDes records for all selected components from `.Connect` lines.
 - Display RefDes activation status as `Automatic`, `Enabled`, `Disabled`, or `Unknown`.
-- Export all RefDes records to an Excel `.xlsx` file with component, RefDes name, and activation status.
+- Export all RefDes records to an Excel `.xlsx` file with component, RefDes name, activation status, and representative NET name (recognizing power NETs on 2-pin decaps regardless of whether pin 1 or pin 2 is wired to ground).
 - Paste or drag-and-drop `.mod` / `.txt` SPICE model text.
 - Select multiple PartialCkt components with `Ctrl`/`Shift` and assign one model to all selected targets.
 - Index a local model folder and search file/folder names, subcircuit names, and comments directly above the model editor.

@@ -19,9 +19,15 @@ _END_CONNECT_RE = re.compile(r"^\.EndC(?:\s|$)", re.IGNORECASE)
 # Connection entries use numeric pins for discrete parts and alphanumeric pins
 # (for example ``A10`` or ``LGA_A10``) for DUT/LGA packages.  Requiring the
 # package-node token avoids mistaking ``Usage = ...`` or ``.EndC`` for a pin.
-_CONNECT_NODE_RE = re.compile(r"^\s*[A-Za-z0-9_./+-]+\s+\$Package\.Node\S*(?:\s|$)", re.IGNORECASE)
+_CONNECT_NODE_RE = re.compile(r"^\s*[A-Za-z0-9_./+-]+\s+(\$Package\.Node\S*)(?:\s|$)", re.IGNORECASE)
 _USAGE_RE = re.compile(r"\bUsage\s*=\s*(\S+)", re.IGNORECASE)
 _USAGE_ASSIGNMENT_RE = re.compile(r"\s+Usage\s*=\s*\S+", re.IGNORECASE)
+_GROUND_TOKEN_RE = re.compile(r"^(?:[A-Z]?GND[A-Z0-9]*|[A-Z]?VSS[A-Z0-9]*|[A-Z]?GROUND[A-Z0-9]*)$")
+_POWER_TOKEN_RE = re.compile(
+    r"^(?:VDD[A-Z0-9]*|VCC[A-Z0-9]*|VPP[A-Z0-9]*|VNN[A-Z0-9]*|VEE[A-Z0-9]*|"
+    r"PWR[A-Z0-9]*|VREF[A-Z0-9]*|VOUT[A-Z0-9]*|VIN[A-Z0-9]*|VBAT[A-Z0-9]*|"
+    r"VSYS[A-Z0-9]*|VBUS[A-Z0-9]*|VREG[A-Z0-9]*|VLDO[A-Z0-9]*|VSW[A-Z0-9]*)$"
+)
 
 _CHUNK_SIZE = 1024 * 1024
 ProgressCallback = Callable[[str, int, int], None]
@@ -195,10 +201,29 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
 
     with spd_path.open("rb", buffering=_CHUNK_SIZE) as handle:
         active_connect: RefDesRecord | None = None
-        active_connect_net_seen = False
         active_net_counts: dict[str, int] = {}
         active_package_nodes = 0
         active_annotated_nodes = 0
+        ordered_nets_by_record: list[tuple[str, ...]] = []
+
+        def finish_active_connect(block_end_offset: int) -> None:
+            nonlocal active_connect, active_net_counts, active_package_nodes, active_annotated_nodes
+            assert active_connect is not None
+            ordered_nets = tuple(active_net_counts)
+            active_connect = _replace_record_metadata(
+                active_connect,
+                connect_block_end_offset=block_end_offset,
+                unique_net_names=tuple(sorted(active_net_counts)),
+                net_node_counts=tuple(sorted(active_net_counts.items())),
+                package_node_count=active_package_nodes,
+                annotated_node_count=active_annotated_nodes,
+            )
+            refdes_records.append(active_connect)
+            ordered_nets_by_record.append(ordered_nets)
+            active_connect = None
+            active_net_counts = {}
+            active_package_nodes = active_annotated_nodes = 0
+
         while True:
             line_start = handle.tell()
             raw_line = handle.readline()
@@ -209,48 +234,20 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
 
             if active_connect is not None:
                 if _END_CONNECT_RE.match(_strip_newline(line_text)):
-                    active_connect = _replace_record_metadata(
-                        active_connect,
-                        connect_block_end_offset=line_start + len(raw_line),
-                        unique_net_names=tuple(sorted(active_net_counts)),
-                        net_node_counts=tuple(sorted(active_net_counts.items())),
-                        package_node_count=active_package_nodes,
-                        annotated_node_count=active_annotated_nodes,
-                    )
-                    refdes_records.append(active_connect)
-                    active_connect = None
-                    active_connect_net_seen = False
-                    active_net_counts = {}
-                    active_package_nodes = active_annotated_nodes = 0
+                    finish_active_connect(line_start + len(raw_line))
                     continue
-                # Use the first node entry that actually carries a ``::Net``;
-                # some DUT/LGA blocks have unannotated pins before the net-bearing entry.
-                if _CONNECT_NODE_RE.match(line_text):
+                node_match = _CONNECT_NODE_RE.match(line_text)
+                if node_match:
                     active_package_nodes += 1
-                    net_name = line_text.split("::", 1)[1].strip() if "::" in line_text else ""
+                    token = node_match.group(1)
+                    net_name = token.split("::", 1)[1] if "::" in token else ""
                     if net_name:
                         active_annotated_nodes += 1
                         active_net_counts[net_name] = active_net_counts.get(net_name, 0) + 1
-                    if not active_connect_net_seen and net_name:
-                        if net_name:
-                            active_connect = _replace_record_net_name(active_connect, net_name)
-                            active_connect_net_seen = True
                 # A malformed block may omit .EndC; preserve the old scanner's
-                # behavior by allowing a new .Connect to terminate the prior one.
-                if _CONNECT_RE.match(_strip_newline(line_text)):
-                    active_connect = _replace_record_metadata(
-                        active_connect,
-                        connect_block_end_offset=line_start,
-                        unique_net_names=tuple(sorted(active_net_counts)),
-                        net_node_counts=tuple(sorted(active_net_counts.items())),
-                        package_node_count=active_package_nodes,
-                        annotated_node_count=active_annotated_nodes,
-                    )
-                    refdes_records.append(active_connect)
-                    active_connect = None
-                    active_connect_net_seen = False
-                    active_net_counts = {}
-                    active_package_nodes = active_annotated_nodes = 0
+                # behavior by allowing a new .Connect or .PartialCkt to terminate the prior one.
+                if _CONNECT_RE.match(_strip_newline(line_text)) or _PARTIAL_START_RE.match(line_text):
+                    finish_active_connect(line_start)
 
             if _PARTIAL_START_RE.match(line_text):
                 block_start_offset = line_start
@@ -327,20 +324,11 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
             record = _parse_connect_line(line_text, start_offset=line_start, end_offset=line_start + len(raw_line))
             if record is not None:
                 active_connect = record
-                active_connect_net_seen = False
                 active_net_counts = {}
                 active_package_nodes = active_annotated_nodes = 0
 
         if active_connect is not None:
-            active_connect = _replace_record_metadata(
-                active_connect,
-                connect_block_end_offset=spd_path.stat().st_size,
-                unique_net_names=tuple(sorted(active_net_counts)),
-                net_node_counts=tuple(sorted(active_net_counts.items())),
-                package_node_count=active_package_nodes,
-                annotated_node_count=active_annotated_nodes,
-            )
-            refdes_records.append(active_connect)
+            finish_active_connect(spd_path.stat().st_size)
 
     _report_progress(
         progress_callback,
@@ -351,7 +339,22 @@ def scan_spd_inventory(path: str | Path, progress_callback: ProgressCallback | N
     port_meta = _scan_port_and_netlist(spd_path, blocks)
     if _source_signature(spd_path) != source_signature:
         raise ValueError("SPD changed during scan; reload before editing.")
-    refdes_records = [replace(record, source_signature=source_signature) for record in refdes_records]
+    all_ground_nets = frozenset(port_meta.pop("all_ground_nets", ()))
+    active_power_nets = frozenset(port_meta["power_nets"])
+    all_power_nets = frozenset(record.net_name for record in port_meta["power_net_records"])
+    refdes_records = [
+        replace(
+            record,
+            net_name=_select_primary_net_name(
+                ordered_nets,
+                active_power_nets=active_power_nets,
+                all_power_nets=all_power_nets,
+                all_ground_nets=all_ground_nets,
+            ),
+            source_signature=source_signature,
+        )
+        for record, ordered_nets in zip(refdes_records, ordered_nets_by_record, strict=True)
+    ]
     return SpdInventory(blocks=blocks, refdes_records=refdes_records, source_signature=source_signature, **port_meta)
 
 
@@ -458,8 +461,8 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
     if path.stat().st_size == 0:
         return {"port_section_start_offset": None, "port_section_end_offset": None,
                 "port_insertion_offset": None, "existing_port_keys": (), "max_port_number": 0,
-                "port_records": (), "ground_nets": (), "net_names": (), "power_nets": (),
-                "power_net_records": (), "vrm_sink_records": ()}
+                "port_records": (), "ground_nets": (), "all_ground_nets": (), "net_names": (),
+                "power_nets": (), "power_net_records": (), "vrm_sink_records": ()}
     def marker_offsets(data: mmap.mmap, marker: bytes) -> list[int]:
         found: list[int] = []
         pos = 0
@@ -574,6 +577,7 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
         net_names: list[str] = []
         power_nets: list[str] = []
         ground_nets: list[str] = []
+        all_ground_nets: list[str] = []
         power_net_records: list[PowerNetRecord] = []
         insertion = None if invalid else end_marker
         if len(nets) == 1 and len(end_nets) == 1 and end_nets[0] > nets[0]:
@@ -594,21 +598,37 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
                 line_end = end_nets[0] if next_line < 0 else next_line + 1
                 line = _strip_newline(bytes(data[cursor:line_end]).decode("utf-8", errors="replace"))
                 line_start, cursor = cursor, line_end
+                stripped = line.strip()
+                if not stripped or stripped.startswith("*"):
+                    continue
+                first_token = stripped.split(None, 1)[0]
+                if first_token.startswith(("::", "||")) or re.match(
+                    r"^(?:RiseTime|%Coupling)\s*=", stripped, re.IGNORECASE
+                ):
+                    continue
                 selected = "::unselected" not in line.casefold()
                 arrow = re.match(r"^\s*(\S+)\s*->\s*(\S+)", line)
                 if arrow:
                     raw_net, group = _net_token_name(arrow.group(1)), _net_token_name(arrow.group(2))
-                    if selected:
-                        if raw_net not in net_names: net_names.append(raw_net)
-                        if group.lower() == "powernets" and raw_net not in power_nets: power_nets.append(raw_net)
-                        if group.lower() == "groundnets" and raw_net not in ground_nets: ground_nets.append(raw_net)
-                elif group and group.lower() in {"powernets", "groundnets"} and line.strip():
-                    raw_net = _net_token_name(line.strip().split(None, 1)[0])
-                    if raw_net and selected and raw_net not in net_names:
-                        net_names.append(raw_net)
-                        (power_nets if group.lower() == "powernets" else ground_nets).append(raw_net)
+                    if raw_net and selected:
+                        if raw_net not in net_names:
+                            net_names.append(raw_net)
+                        if group.lower() == "powernets" and raw_net not in power_nets:
+                            power_nets.append(raw_net)
+                        if group.lower() == "groundnets" and raw_net not in ground_nets:
+                            ground_nets.append(raw_net)
+                elif group and group.lower() in {"powernets", "groundnets"}:
+                    raw_net = _net_token_name(first_token)
+                    if raw_net and selected:
+                        if raw_net not in net_names:
+                            net_names.append(raw_net)
+                        target_group = power_nets if group.lower() == "powernets" else ground_nets
+                        if raw_net not in target_group:
+                            target_group.append(raw_net)
                 else:
                     continue
+                if raw_net and group.lower() == "groundnets" and raw_net not in all_ground_nets:
+                    all_ground_nets.append(raw_net)
                 if raw_net and group.lower() == "powernets":
                     power_net_records.append(PowerNetRecord(
                         net_name=raw_net, selected=selected,
@@ -619,7 +639,8 @@ def _scan_port_and_netlist(path: Path, blocks: Sequence[PartialCktBlock] = ()) -
             "port_insertion_offset": insertion,
             "existing_port_keys": tuple(dict.fromkeys(keys)), "max_port_number": max_number,
             "port_records": tuple(port_records),
-            "ground_nets": tuple(ground_nets), "net_names": tuple(net_names),
+            "ground_nets": tuple(ground_nets), "all_ground_nets": tuple(all_ground_nets),
+            "net_names": tuple(net_names),
             "power_nets": tuple(power_nets), "power_net_records": tuple(power_net_records),
             "vrm_sink_records": tuple(vrm_sink_records)}
 
@@ -1149,7 +1170,7 @@ def _rename_partial_header(header_lines: Sequence[str], name: str) -> list[str]:
         first = f".PartialCkt {name} ExtNode = {match.group(2)}"
     else:
         parts = first.split(maxsplit=1)
-        first = f"{parts[0]} {name}" if len(parts) > 1 else f"{parts[0]} {name}"
+        first = f"{parts[0]} {name}"
     return [first, *header_lines[1:]]
 
 
@@ -1225,21 +1246,44 @@ def _parse_connect_line(
     )
 
 
-def _replace_record_net_name(record: RefDesRecord, net_name: str) -> RefDesRecord:
-    return RefDesRecord(
-        component_name=record.component_name,
-        refdes_name=record.refdes_name,
-        activation_status=record.activation_status,
-        net_name=net_name,
-        connect_line_start_offset=record.connect_line_start_offset,
-        connect_line_end_offset=record.connect_line_end_offset,
-        connect_line=record.connect_line,
-        connect_block_end_offset=record.connect_block_end_offset,
-        unique_net_names=record.unique_net_names,
-        net_node_counts=record.net_node_counts,
-        package_node_count=record.package_node_count,
-        annotated_node_count=record.annotated_node_count,
-    )
+def _is_ground_net_name(net_name: str) -> bool:
+    """Heuristically detect common ground NET names when .NetList does not classify them."""
+    base = re.sub(r"/\d+$", "", net_name.strip()).upper()
+    if not base:
+        return False
+    tokens = [token for token in re.split(r"[^A-Z0-9]+", base) if token]
+    if not tokens:
+        return False
+    if any(_POWER_TOKEN_RE.fullmatch(token) for token in tokens):
+        return False
+    return any(_GROUND_TOKEN_RE.fullmatch(token) for token in tokens)
+
+
+def _select_primary_net_name(
+    ordered_nets: Sequence[str],
+    *,
+    active_power_nets: frozenset[str],
+    all_power_nets: frozenset[str],
+    all_ground_nets: frozenset[str],
+) -> str:
+    """Pick the representative NET for a RefDes, preferring power/non-ground NETs over ground."""
+    if not ordered_nets:
+        return ""
+    if len(ordered_nets) == 1:
+        return ordered_nets[0]
+    for net in ordered_nets:
+        if net in active_power_nets:
+            return net
+    for net in ordered_nets:
+        if net in all_power_nets:
+            return net
+    for net in ordered_nets:
+        if net not in all_ground_nets and not _is_ground_net_name(net):
+            return net
+    for net in ordered_nets:
+        if net not in all_ground_nets:
+            return net
+    return ordered_nets[0]
 
 
 def _replace_record_metadata(record: RefDesRecord, **changes: object) -> RefDesRecord:

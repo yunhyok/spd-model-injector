@@ -219,6 +219,9 @@ def test_scan_spd_inventory_reads_primary_net_name_from_alphanumeric_pin(tmp_pat
         ".Connect LGA LGA-ALL Usage = 0b1000 Checked = 1\n"
         "A10 $Package.Node20666!!A10::DGND\n"
         "AA1 $Package.Node20667!!AA1::VDD\n"
+        ".EndC\n"
+        ".Connect LGA_GND LGA-GND Usage = 0b1000 Checked = 1\n"
+        "A10 $Package.Node20668!!A10::DGND\n"
         ".EndC\n",
         encoding="utf-8",
         newline="\n",
@@ -226,7 +229,130 @@ def test_scan_spd_inventory_reads_primary_net_name_from_alphanumeric_pin(tmp_pat
 
     inventory = scan_spd_inventory(spd_path)
 
-    assert inventory.refdes_records[0].net_name == "DGND"
+    assert [(record.refdes_name, record.net_name) for record in inventory.refdes_records] == [
+        ("LGA", "VDD"),
+        ("LGA_GND", "DGND"),
+    ]
+
+
+def test_scan_spd_inventory_prefers_power_net_for_swapped_decap_pins(tmp_path: Path) -> None:
+    spd_path = tmp_path / "decaps.spd"
+    spd_path.write_text(
+        ".Connect C_NORM CAP_0402 Checked = 1\n"
+        "1 $Package.Node1!!1::5V_A\n"
+        "2 $Package.Node2!!2::DGND\n"
+        ".EndC\n"
+        ".Connect C_SWAP CAP_0402 Checked = 1\n"
+        "1 $Package.Node3!!1::DGND\n"
+        "2 $Package.Node4!!2::5V_A\n"
+        ".EndC\n"
+        ".Connect C_SWAP_OFF CAP_0402 Checked = 1\n"
+        "1 $Package.Node5!!1::DGND\n"
+        "2 $Package.Node6!!2::VDD_OFF\n"
+        ".EndC\n"
+        ".Connect C_CUSTOM_GND CAP_0402 Checked = 1\n"
+        "1 $Package.Node7!!1::MY_REF\n"
+        "2 $Package.Node8!!2::3V3_AUX\n"
+        ".EndC\n"
+        ".Connect C_SIGNED CAP_0402 Checked = 1\n"
+        "1 $Package.Node9!!1::DGND\n"
+        "2 $Package.Node10!!2::+3_3V\n"
+        ".EndC\n"
+        ".Connect C_BOTH_GND CAP_0402 Checked = 1\n"
+        "1 $Package.Node11!!1::DGND\n"
+        "2 $Package.Node12!!2::AGND\n"
+        ".EndC\n"
+        ".Connect C_BOTH_PWR CAP_0402 Checked = 1\n"
+        "1 $Package.Node13!!1::5V_A\n"
+        "2 $Package.Node14!!2::+3_3V\n"
+        ".EndC\n"
+        ".Connect C_3PIN CAP_3T Checked = 1\n"
+        "1 $Package.Node15!!1::DGND\n"
+        "2 $Package.Node16!!2::VDD_CORE\n"
+        "3 $Package.Node17!!3::DGND\n"
+        ".EndC\n"
+        ".Connect C_TRAILING CAP_0402 Checked = 1\n"
+        "1 $Package.Node18!!1::DGND * inline note\n"
+        "2 $Package.Node19!!2::5V_A * inline note\n"
+        ".EndC\n"
+        ".NetList\n"
+        "\tDGND -> GroundNets Color = YELLOW Voltage = 0\n"
+        "\tAGND Color = YELLOW\n"
+        "\tMY_REF::Unselected Color = GRAY\n"
+        "\t5V_A -> PowerNets Color = RED\n"
+        "\t+3_3V Color = RED\n"
+        "\tVDD_CORE Color = RED\n"
+        "\tVDD_OFF::Unselected Color = BLUE\n"
+        ".EndNetList\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    inventory = scan_spd_inventory(spd_path)
+
+    assert [(record.refdes_name, record.net_name) for record in inventory.refdes_records] == [
+        ("C_NORM", "5V_A"),
+        ("C_SWAP", "5V_A"),
+        ("C_SWAP_OFF", "VDD_OFF"),
+        ("C_CUSTOM_GND", "3V3_AUX"),
+        ("C_SIGNED", "+3_3V"),
+        ("C_BOTH_GND", "DGND"),
+        ("C_BOTH_PWR", "5V_A"),
+        ("C_3PIN", "VDD_CORE"),
+        ("C_TRAILING", "5V_A"),
+    ]
+
+
+def test_scan_spd_inventory_prefers_non_ground_net_without_netlist(tmp_path: Path) -> None:
+    spd_path = tmp_path / "no-netlist-decaps.spd"
+    spd_path.write_text(
+        ".Connect C1 CAP_0402 Checked = 1\n"
+        "1 $Package.Node1!!1::DGND\n"
+        "2 $Package.Node2!!2::5V_A\n"
+        ".EndC\n"
+        ".Connect C2 CAP_0402 Checked = 1\n"
+        "1 $Package.Node3!!1::VSS_CORE\n"
+        "2 $Package.Node4!!2::VDD_1V8\n"
+        ".EndC\n"
+        ".Connect C3 CAP_0402 Checked = 1\n"
+        "1 $Package.Node5!!1::DGND/0\n"
+        "2 $Package.Node6!!2::VDD_GND_SENSE\n"
+        ".EndC\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    inventory = scan_spd_inventory(spd_path)
+
+    assert [(record.refdes_name, record.net_name) for record in inventory.refdes_records] == [
+        ("C1", "5V_A"),
+        ("C2", "VDD_1V8"),
+        ("C3", "VDD_GND_SENSE"),
+    ]
+
+
+def test_scan_spd_inventory_ignores_comments_inside_netlist(tmp_path: Path) -> None:
+    spd_path = tmp_path / "comment-netlist.spd"
+    spd_path.write_text(
+        ".Port\n.EndPort\n"
+        ".NetList\n"
+        "\t* Top comment\n"
+        "\tDGND -> GroundNets Color = YELLOW\n"
+        "\t* Ground section comment\n"
+        "\tVDD_A -> PowerNets Color = RED\n"
+        "\t* Power section comment\n"
+        "\tVDD_B Color = RED\n"
+        ".EndNetList\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    inventory = scan_spd_inventory(spd_path)
+
+    assert inventory.ground_nets == ("DGND",)
+    assert inventory.power_nets == ("VDD_A", "VDD_B")
+    assert inventory.net_names == ("DGND", "VDD_A", "VDD_B")
+    assert [record.net_name for record in inventory.power_net_records] == ["VDD_A", "VDD_B"]
 
 
 def test_write_spd_replaces_only_changed_partialckt_bodies_and_keeps_lf(tmp_path: Path) -> None:

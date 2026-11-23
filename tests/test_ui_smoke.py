@@ -1542,3 +1542,59 @@ def test_port_refdes_tree_context_menu_expands_and_collapses(monkeypatch) -> Non
     FakeMenu.selected = "Collapse All"
     window._show_port_refdes_context_menu(QPoint())
     assert not parent.isExpanded()
+
+
+def test_busy_state_toggles_export_refdes_action() -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow(restore_model_library=False)
+    window.refdes_records = [RefDesRecord("CAP", "C1", "Automatic", net_name="5V_A")]
+    window._set_busy(True)
+    assert not window.export_refdes_action.isEnabled()
+    window._set_busy(False)
+    assert window.export_refdes_action.isEnabled()
+
+
+def test_export_refdes_dialog_reports_os_error_with_warning(tmp_path: Path, monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow(restore_model_library=False)
+    window.refdes_records = [RefDesRecord("CAP", "C1", "Automatic", net_name="5V_A")]
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "spd_model_injector.ui.main_window.QFileDialog.getSaveFileName",
+        lambda *_args: (str(tmp_path / "locked.xlsx"), ""),
+    )
+    monkeypatch.setattr(
+        window,
+        "export_refdes_excel",
+        lambda _path: (_ for _ in ()).throw(PermissionError("locked in Excel")),
+    )
+    monkeypatch.setattr(
+        "spd_model_injector.ui.main_window.QMessageBox.warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    window.export_refdes_dialog()
+
+    assert warnings == [("Export RefDes Excel", "locked in Excel")]
+    assert "locked in Excel" in window.status_log.toPlainText()
+
+
+def test_export_spd_dialog_blocks_when_batch_edit_is_pending(tmp_path: Path, monkeypatch) -> None:
+    QApplication.instance() or QApplication([])
+    window = MainWindow(restore_model_library=False)
+    window.spd_path = tmp_path / "board.spd"
+    window._batch_edit_pending = True
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "spd_model_injector.ui.main_window.QMessageBox.warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+    monkeypatch.setattr(
+        "spd_model_injector.ui.main_window.QFileDialog.getSaveFileName",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("file dialog should not open")),
+    )
+
+    window.export_spd_dialog()
+
+    assert len(warnings) == 1
+    assert "Validate/Convert" in warnings[0][1]
